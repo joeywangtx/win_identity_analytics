@@ -4,6 +4,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![Power BI](https://img.shields.io/badge/Power%20BI-F2C811?logo=powerbi&logoColor=black)
 ![Tests](https://img.shields.io/badge/Pester%20tests-48%20passing-brightgreen)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 An end-to-end identity risk analytics pipeline. It collects account, group and authentication data from Windows,
 computes identity **key risk indicators (KRIs)** in SQL, and reports them in Power BI. It then applies behavioural
@@ -28,6 +29,7 @@ measures how well they detect a labelled red team, using precision, recall and F
 11. [Limitations](#limitations)
 12. [Repository layout](#repository-layout)
 13. [References](#references)
+14. [License](#license)
 
 ---
 
@@ -435,3 +437,8 @@ such as the tables above, are published.
 
 1. A. D. Kent, "Comprehensive, Multi-Source Cybersecurity Events," Los Alamos National Laboratory, 2015.
    <http://dx.doi.org/10.17021/1179829>. Dataset page: <https://csr.lanl.gov/data/cyber1/>. Released under CC0.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The LANL dataset used for the enterprise analysis is public domain (CC0) and is not
+redistributed here; only aggregate results derived from it are published.
