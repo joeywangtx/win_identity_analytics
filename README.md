@@ -6,9 +6,10 @@
 ![Tests](https://img.shields.io/badge/Pester%20tests-48%20passing-brightgreen)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-An end-to-end identity risk analytics pipeline. It collects account, group and authentication data from Windows,
-computes identity **key risk indicators (KRIs)** in SQL, and reports them in Power BI. It then applies behavioural
-indicators to real enterprise authentication logs from Los Alamos National Laboratory ([LANL](#references)) and
+An end-to-end identity risk analytics pipeline. It collects account, group and authentication data from a Windows 11
+lab VM, built from scratch on Hyper-V with PowerShell ([details](#building-the-lab-vm)). It computes identity
+**key risk indicators (KRIs)** in SQL and reports them in Power BI. Finally, it applies behavioural indicators to
+real enterprise authentication logs from Los Alamos National Laboratory ([LANL](#references)) and
 measures how well they detect a labelled red team, using precision, recall and F1.
 
 > **Docs:** this page covers purpose, method and results. For installation, configuration, testing and
@@ -19,11 +20,11 @@ measures how well they detect a labelled red team, using precision, recall and F
 1. [Key results](#key-results)
 2. [Purpose](#purpose)
 3. [Architecture](#architecture)
-4. [Quick start](#quick-start)
-5. [Methodology](#methodology)
-6. [The data](#the-data)
-7. [Analytics](#analytics)
-8. [Why a VM](#why-a-vm)
+4. [Building the lab VM](#building-the-lab-vm)
+5. [Quick start](#quick-start)
+6. [Methodology](#methodology)
+7. [The data](#the-data)
+8. [Analytics](#analytics)
 9. [Results](#results)
 10. [Recommendations](#recommendations)
 11. [Limitations](#limitations)
@@ -43,7 +44,8 @@ measures how well they detect a labelled red team, using precision, recall and F
 | **Highest precision (LANL)** | `combined_lateral`: 0.60 precision in a 20-user list. `combined_risk` is 5 for 5 at N = 5. |
 | **Weak signals** | Failure-, NTLM- and logon-type indicators are close to noise. Blending them in makes the combined score worse. |
 | **Main gap** | No indicator catches most attackers in a short list. Many red-team users log on only once or twice on the detection day. |
-| **Lab VM** | Collection in progress, ending around 7 November 2026. Results will be added afterwards. |
+| **Lab environment** | A Windows 11 VM built and configured entirely with PowerShell on Hyper-V (Generation 2, virtual TPM, Secure Boot), running the collector daily as a SYSTEM scheduled task. |
+| **Lab VM results** | Collection in progress, ending around 7 November 2026. Results will be added afterwards. |
 
 **N** is the number of top-scoring users flagged per indicator, which works like an analyst's daily review budget.
 **Best N** is the N with the highest F1 for that indicator.
@@ -91,6 +93,85 @@ flowchart LR
 Design highlights: incremental, idempotent loading keyed on `EventRecordID`; detection of gaps from log rollover and
 log clearing; orphaned-SID handling; locale-safe matching by SID and GUID; and reproducible time references. See
 [ENGINEERING.md → Design notes](ENGINEERING.md#design-notes).
+
+## Building the lab VM
+
+Part 1 runs inside a Windows 11 virtual machine, `IDLAB-VM`. I built it from scratch on Hyper-V with PowerShell, and
+it has been collecting daily since 24 October 2026. The full step-by-step guide is in [VM_SETUP.md](VM_SETUP.md).
+
+### Why a VM
+
+The collector needs a Windows machine where it is safe, and meaningful, to do things you would never do on a real
+workstation:
+
+- **It changes security settings.** Setup rewrites the audit policy, resizes the Security log and sets an account
+  lockout policy.
+- **It creates, breaks and deletes accounts.** The scenario adds a user to Administrators, triggers lockouts and
+  deletes an account that is still in a group.
+- **It needs a known starting point.** A fresh VM has a short account list and an empty Security log, so nearly every
+  event is either staged (and logged) or attributable to Windows. That makes the local checks testable against
+  ground truth.
+- **It must run for weeks.** Dormancy, password age and "remove the temporary admin a week later" only appear over
+  time.
+- **It can be rolled back.** Checkpoints make any mistake a one-command undo.
+
+### VM specification
+
+| Setting | Value | Why |
+|---|---|---|
+| Hypervisor | Hyper-V (built into Windows 11 Pro) | No extra software; fully scriptable from PowerShell |
+| OS | Windows 11 Enterprise evaluation | Free for 90 days, no product key, and easy to set up with a local account |
+| Generation | 2 | Required for Secure Boot and TPM |
+| CPU / memory | 2 vCPUs, 4 GB fixed | Windows 11 minimums. Leaves the 16 GB host about 12 GB |
+| Disk | 64 GB dynamic VHDX | Starts at about 25 GB and grows as needed |
+| Network | Default Switch (NAT) | Internet access with no network setup |
+| Security | Secure Boot (Windows template) + virtual TPM | Windows 11 setup refuses to install without them |
+
+### How it was built
+
+```mermaid
+flowchart LR
+    A["Enable Hyper-V"] --> B["Create VM<br/>(PowerShell script)"]
+    B --> C["Install Windows 11<br/>local account"]
+    C --> D["Prepare: updates,<br/>PSSQLite, no sleep"]
+    D --> E["Checkpoint<br/>clean-install"]
+    E --> F["Copy code in via<br/>PowerShell Direct"]
+    F --> G["Audit policy +<br/>daily SYSTEM task"]
+    G --> H["Checkpoint<br/>collector-ready"]
+```
+
+The VM itself is created by a short script rather than clicked together in Hyper-V Manager, so it can be rebuilt with
+exactly the same settings:
+
+```powershell
+New-VM -Name IDLAB-VM -Generation 2 -MemoryStartupBytes 4GB -Path C:\HyperV `
+       -NewVHDPath C:\HyperV\IDLAB-VM\IDLAB-VM.vhdx -NewVHDSizeBytes 64GB -SwitchName 'Default Switch'
+Set-VMProcessor -VMName IDLAB-VM -Count 2
+Set-VMKeyProtector -VMName IDLAB-VM -NewLocalKeyProtector
+Enable-VMTPM -VMName IDLAB-VM                                   # Windows 11 needs a TPM
+Set-VMFirmware -VMName IDLAB-VM -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+Enable-VMIntegrationService -VMName IDLAB-VM -Name 'Guest Service Interface'   # for PowerShell Direct
+```
+
+Code goes in, and the database comes out, through **PowerShell Direct** (`New-PSSession -VMName`), which talks to the
+VM over the Hyper-V bus without any network shares.
+
+### What I learned building it
+
+- **Windows 11 has hard hardware requirements, even in a VM.** Without a Generation 2 VM, Secure Boot with the
+  Microsoft template, a virtual TPM and fixed memory, setup refuses to install.
+- **Scheduled tasks running as SYSTEM don't see your user profile.** PowerShell modules installed for the current
+  user are invisible to SYSTEM, so PSSQLite must be installed for all users. The collector writes to
+  `%ProgramData%` for the same reason.
+- **A VM only collects while it's running.** A paused or stopped VM logs nothing. The task is set to run late on the
+  next start, and the run history makes any gap visible instead of silent.
+- **Take checkpoints at known-good points.** `clean-install` and `collector-ready` made it safe to experiment.
+  Restoring a checkpoint discards collected data, so the database is copied out first.
+- **Do Windows Update before collecting.** Updates add a lot of noise to the Security log, so they're done before
+  the collector starts.
+
+A standalone VM has no Active Directory and therefore no domain-wide Kerberos events. Part 2 uses LANL for enterprise
+scale.
 
 ## Quick start
 
@@ -276,25 +357,6 @@ A small N gives a short, high-precision alert queue. A large N catches more atta
 | Failed logons (7 days), LANL best F1 | Context only (`info`) |
 
 Thresholds are defined in [sql/kri_summary.sql](sql/kri_summary.sql).
-
-## Why a VM
-
-The local half needs a Windows machine where it is safe, and meaningful, to do things you would never do on a real
-workstation:
-
-- **It changes security settings.** Setup rewrites the audit policy, resizes the Security log and sets an account
-  lockout policy.
-- **It creates, breaks and deletes accounts.** The scenario adds a user to Administrators, triggers lockouts and
-  deletes an account that is still in a group.
-- **It needs a known starting point.** A fresh VM has a short account list and an empty Security log, so nearly every
-  event is either staged (and logged) or attributable to Windows. That makes the local checks testable against
-  ground truth.
-- **It must run for weeks.** Dormancy, password age and "remove the temporary admin a week later" only appear over
-  time.
-- **It can be rolled back.** VM checkpoints make any mistake a one-command undo.
-
-A standalone VM has no Active Directory and therefore no domain-wide Kerberos events. Part 2 uses LANL for enterprise
-scale. VM build steps are in [VM_SETUP.md](VM_SETUP.md).
 
 ## Results
 
