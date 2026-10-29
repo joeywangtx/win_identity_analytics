@@ -1,0 +1,26 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Eventlog" Guid="{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}" />
+    <EventID>1102</EventID>
+    <Version>0</Version>
+    <Level>4</Level>
+    <Task>104</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x4020000000000000</Keywords>
+    <TimeCreated SystemTime="2026-10-22T18:00:00.0000000Z" />
+    <EventRecordID>81400</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="1404" ThreadID="5288" />
+    <Channel>Security</Channel>
+    <Computer>IDLAB-VM</Computer>
+    <Security />
+  </System>
+  <UserData>
+    <LogFileCleared xmlns="http://manifests.microsoft.com/win/2004/08/windows/eventlog">
+      <SubjectUserSid>S-1-5-21-1111111111-2222222222-3333333333-500</SubjectUserSid>
+      <SubjectUserName>labadmin</SubjectUserName>
+      <SubjectDomainName>IDLAB-VM</SubjectDomainName>
+      <SubjectLogonId>0x4b21a</SubjectLogonId>
+    </LogFileCleared>
+  </UserData>
+</Event>

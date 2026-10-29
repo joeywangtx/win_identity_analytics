@@ -1,0 +1,18 @@
+# Real data never goes in the repo: VM database, event exports, LANL files (CC0, but
+# gigabytes; download them from LANL), staged-activity credentials.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.evtx
+*.gz
+*.csv
+!sample/sample.db
+
+# Power BI caches
+powerbi/*.pbix.bak
+
+# Local-only: Power BI draft (embeds imported data) and personal planning notes
+*.pbix
+Project_Plan.md

@@ -1,0 +1,27 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Security-Auditing" Guid="{54849625-5478-4994-a5ba-3e3b0328c30d}" />
+    <EventID>4740</EventID>
+    <Version>0</Version>
+    <Level>0</Level>
+    <Task>13824</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8020000000000000</Keywords>
+    <TimeCreated SystemTime="2026-10-20T14:06:03.7700000Z" />
+    <EventRecordID>81251</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="812" ThreadID="4410" />
+    <Channel>Security</Channel>
+    <Computer>IDLAB-VM</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data Name="TargetUserName">temp_contractor</Data>
+    <Data Name="TargetDomainName">ATTACKER-PC</Data>
+    <Data Name="TargetSid">S-1-5-21-1111111111-2222222222-3333333333-1003</Data>
+    <Data Name="SubjectUserSid">S-1-5-18</Data>
+    <Data Name="SubjectUserName">IDLAB-VM$</Data>
+    <Data Name="SubjectDomainName">WORKGROUP</Data>
+    <Data Name="SubjectLogonId">0x3e7</Data>
+  </EventData>
+</Event>
