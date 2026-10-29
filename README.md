@@ -96,7 +96,7 @@ The published synthetic database runs on any Windows machine. You only need the
 [sqlite3 command-line tool](https://sqlite.org/download.html):
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/joeywangtx/win_identity_analytics
 cd win_identity_analytics
 
 # KRI summary (the dashboard's first page)
