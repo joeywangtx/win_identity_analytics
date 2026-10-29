@@ -3,6 +3,7 @@
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207-5391FE?logo=powershell&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![Power BI](https://img.shields.io/badge/Power%20BI-F2C811?logo=powerbi&logoColor=black)
+[![Hyper-V](https://img.shields.io/badge/Hyper--V-Windows%2011-0078D4)](#building-the-lab-vm)
 ![Tests](https://img.shields.io/badge/Pester%20tests-48%20passing-brightgreen)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
