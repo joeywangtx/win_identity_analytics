@@ -289,8 +289,26 @@ corporate network, with user and computer names anonymised. It pairs real enterp
 ground-truth red-team labels, and it is released under CC0. This project uses `auth.txt.gz` (7.2 GB) and
 `redteam.txt.gz` (4.8 KB). The process, flow and DNS files are not used.
 
+In plain terms, `auth.txt.gz` is a record of every logon on a real network of about 16,000 daily users: who logged
+on, from which computer, to which computer, how, and whether it worked. `redteam.txt.gz` lists the logons made by
+LANL's own security team while it played the attacker, which gives an answer key to grade the indicators against.
+
 **Slice:** baseline = **day 7** (1 red-team event, nearly clean), detection = **day 8** (the busiest red-team day,
 273 events by 45 users).
+
+**Why these two days?**
+
+- **Day 8 is the detection day** because it has the most red-team activity in the whole dataset: 45 attacker
+  accounts. Day 12 comes next with 39, and most days with any red-team activity have only 1 to 4. More attackers to find makes precision and recall meaningful
+  instead of hinging on a handful of users.
+- **Day 7 is the baseline** because it's the day right before and almost free of attackers (a single red-team
+  event). Indicators like *new user→computer pairs* learn "normal" from the baseline, so it needs to be clean, and
+  close enough in time that normal behaviour hasn't changed.
+- **They're early in the file.** The log is sorted by time, so the importer can stop after day 8, reading about
+  150 million lines instead of more than a billion.
+
+The per-day red-team counts behind this choice, and an alternative pair (baseline 11, detection 12–13), are in
+[lanl/README.md](lanl/README.md#choosing-the-slice).
 
 | Step | Rows |
 |---|---|
@@ -301,8 +319,8 @@ ground-truth red-team labels, and it is released under CC0. This project uses `a
 | Removed: computer accounts | 10,053,920 |
 | **Kept for analysis** | **6,220,394** (3.12M baseline, 3.10M detection) |
 
-About 16,000 users are active per day, of whom 45 are labelled red team: a base rate of **0.28%**. Download steps and
-slice-selection details are in [lanl/README.md](lanl/README.md).
+About 16,000 users are active per day, of whom 45 are labelled red team: a base rate of **0.28%**. Download steps are in
+[lanl/README.md](lanl/README.md).
 
 ## Analytics
 
