@@ -31,8 +31,9 @@ INSERT INTO group_membership VALUES
   (2, 'Users',                'S-1-5-32-545', 'S-1-5-21-1-2-3-1001', 'IDLAB-VM\jsmith',          'Local'),
   (2, 'Remote Desktop Users', 'S-1-5-32-555', 'S-1-5-21-1-2-3-1001', 'IDLAB-VM\jsmith',          'Local');
 
--- record_id, time, event_id, user, sid, logon_type, status, sub_status, ip, process, package
-INSERT INTO auth_event VALUES
+-- All events are log epoch 0 (the column default).
+INSERT INTO auth_event (record_id, time_created, event_id, target_user, target_sid, logon_type,
+                        status_code, sub_status, source_ip, process_name, auth_package) VALUES
   (1,  '2026-10-20 08:00:00', 4624, 'svc_backup',      'S-1-5-21-1-2-3-1002', 5, NULL, NULL, NULL, NULL, 'Negotiate'),
   -- 5 bad passwords then lockout (record 7)
   (2,  '2026-10-23 10:00:00', 4625, 'temp_contractor', NULL, 3, '0xC000006D', '0xC000006A', '192.168.56.20', NULL, 'NTLM'),
@@ -48,8 +49,8 @@ INSERT INTO auth_event VALUES
   -- a logon by an account that was later deleted
   (26, '2026-10-12 12:00:00', 4624, 'deleted_user',    'S-1-5-21-1-2-3-1006', 2, NULL, NULL, '127.0.0.1', NULL, 'Negotiate');
 
--- record_id, time, event_id, actor, target_user, target_sid, group_name, group_sid
-INSERT INTO account_change VALUES
+INSERT INTO account_change (record_id, time_created, event_id, actor, target_user, target_sid,
+                            group_name, group_sid) VALUES
   (7,  '2026-10-23 10:04:30', 4740, 'IDLAB-VM$', 'temp_contractor', 'S-1-5-21-1-2-3-1003', NULL, NULL),
   (10, '2026-10-23 10:20:00', 4767, 'labadmin',  'temp_contractor', 'S-1-5-21-1-2-3-1003', NULL, NULL),
   (13, '2026-10-23 10:32:00', 4740, 'IDLAB-VM$', 'temp_contractor', 'S-1-5-21-1-2-3-1003', NULL, NULL),

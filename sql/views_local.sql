@@ -104,11 +104,11 @@ GROUP BY x.day, x.target_user, x.logon_type, x.logon_type_name, x.reason_code, s
 -- of the same account, capped at 24 hours.
 DROP VIEW IF EXISTS v_lockouts;
 CREATE VIEW v_lockouts AS
-SELECT record_id, lockout_time, date(lockout_time) AS day, account, actor,
+SELECT log_epoch, record_id, lockout_time, date(lockout_time) AS day, account, actor,
        first_failure, failures_before_lockout,
        ROUND((julianday(lockout_time) - julianday(first_failure)) * 1440, 1) AS minutes_to_lockout
 FROM (
-  SELECT l.record_id, l.time_created AS lockout_time, l.target_user AS account, l.actor,
+  SELECT l.log_epoch, l.record_id, l.time_created AS lockout_time, l.target_user AS account, l.actor,
          (SELECT MIN(f.time_created) FROM auth_event f
            WHERE f.event_id = 4625 AND lower(f.target_user) = lower(l.target_user)
              AND f.time_created <= l.time_created
@@ -134,7 +134,7 @@ FROM (
 -- 4732/4733 log local members as '-' in MemberName, so fall back to the snapshot by SID.
 DROP VIEW IF EXISTS v_privileged_group_changes;
 CREATE VIEW v_privileged_group_changes AS
-SELECT c.record_id, c.time_created, date(c.time_created) AS day,
+SELECT c.log_epoch, c.record_id, c.time_created, date(c.time_created) AS day,
        CASE c.event_id WHEN 4732 THEN 'added' ELSE 'removed' END AS action,
        pg.label AS privileged_group,
        c.group_name,
@@ -150,7 +150,7 @@ WHERE c.event_id IN (4732, 4733);
 
 DROP VIEW IF EXISTS v_account_lifecycle;
 CREATE VIEW v_account_lifecycle AS
-SELECT c.record_id, c.time_created, date(c.time_created) AS day, c.event_id,
+SELECT c.log_epoch, c.record_id, c.time_created, date(c.time_created) AS day, c.event_id,
        er.label AS action,
        COALESCE(c.target_user, c.target_sid) AS account,
        c.target_sid,
@@ -192,6 +192,6 @@ WHERE ev.sid NOT IN (SELECT sid FROM v_account_latest);
 DROP VIEW IF EXISTS v_run_history;
 CREATE VIEW v_run_history AS
 SELECT run_id, started_at, date(started_at) AS day, finished_at, host,
-       events_loaded, accounts, group_members, status, notes, error,
+       events_loaded, accounts, group_members, status, notes, error, COALESCE(log_epoch, 0) AS log_epoch,
        ROUND((julianday(finished_at) - julianday(started_at)) * 86400, 1) AS duration_sec
 FROM runs;

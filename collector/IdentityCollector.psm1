@@ -13,9 +13,9 @@ $script:SqlDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'sql'
 $script:AuthEventIds   = @(4624, 4625, 4648, 4672)
 $script:ChangeEventIds = @(1102, 4720, 4722, 4723, 4724, 4725, 4726, 4732, 4733, 4738, 4740, 4767)
 
-$script:AuthColumns   = 'record_id', 'time_created', 'event_id', 'target_user', 'target_sid',
+$script:AuthColumns   = 'log_epoch', 'record_id', 'time_created', 'event_id', 'target_user', 'target_sid',
                         'logon_type', 'status_code', 'sub_status', 'source_ip', 'process_name', 'auth_package'
-$script:ChangeColumns = 'record_id', 'time_created', 'event_id', 'actor', 'target_user', 'target_sid',
+$script:ChangeColumns = 'log_epoch', 'record_id', 'time_created', 'event_id', 'actor', 'target_user', 'target_sid',
                         'group_name', 'group_sid'
 $script:AccountColumns = 'run_id', 'sid', 'name', 'enabled', 'last_logon', 'pwd_last_set',
                          'pwd_never_expires', 'pwd_required', 'description'
@@ -303,13 +303,55 @@ function Invoke-SqlFile {
     Invoke-SqliteQuery -SQLiteConnection $Connection -Query $sql | Out-Null
 }
 
+function Update-IdentitySchema {
+    # Upgrades a database created before log_epoch existed: adds runs.log_epoch, and rebuilds
+    # auth_event / account_change with the (log_epoch, record_id) key, keeping every row as
+    # epoch 0. One transaction, so a failure leaves the old tables untouched. The data is
+    # copied rather than renamed because RENAME rewrites view references on newer SQLite.
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [string]$SqlPath = $script:SqlDir
+    )
+    $columnsOf = {
+        param([string]$Table)
+        @(Invoke-SqliteQuery -SQLiteConnection $Connection -Query "PRAGMA table_info($Table)" | ForEach-Object name)
+    }
+    $addRunEpoch = (& $columnsOf 'runs') -notcontains 'log_epoch'
+    $rebuild = @('auth_event', 'account_change' | Where-Object { (& $columnsOf $_) -notcontains 'log_epoch' })
+    if (-not $addRunEpoch -and -not $rebuild.Count) { return }
+
+    $sql = New-Object System.Text.StringBuilder
+    [void]$sql.AppendLine('BEGIN;')
+    if ($addRunEpoch) { [void]$sql.AppendLine('ALTER TABLE runs ADD COLUMN log_epoch INTEGER;') }
+    $copies = @{}
+    foreach ($t in $rebuild) {
+        $copies[$t] = (& $columnsOf $t) -join ', '
+        [void]$sql.AppendLine("CREATE TABLE ${t}_premigration AS SELECT * FROM $t; DROP TABLE $t;")
+    }
+    # Recreates the dropped tables and their indexes with the current definitions.
+    [void]$sql.AppendLine([IO.File]::ReadAllText((Resolve-Path (Join-Path $SqlPath 'schema.sql'))))
+    foreach ($t in $rebuild) {
+        [void]$sql.AppendLine("INSERT INTO $t ($($copies[$t])) SELECT $($copies[$t]) FROM ${t}_premigration;")
+        [void]$sql.AppendLine("DROP TABLE ${t}_premigration;")
+    }
+    [void]$sql.AppendLine('COMMIT;')
+
+    try { Invoke-SqliteQuery -SQLiteConnection $Connection -Query $sql.ToString() | Out-Null }
+    catch {
+        try { Invoke-SqliteQuery -SQLiteConnection $Connection -Query 'ROLLBACK;' | Out-Null } catch { }
+        throw
+    }
+}
+
 function Initialize-IdentityDatabase {
     # Applies schema + views. All statements are idempotent, so this runs on every collection.
     param(
         [Parameter(Mandatory)]$Connection,
         [string]$SqlPath = $script:SqlDir
     )
-    foreach ($file in 'schema.sql', 'views_local.sql', 'kri_summary.sql') {
+    Invoke-SqlFile -Connection $Connection -Path (Join-Path $SqlPath 'schema.sql')
+    Update-IdentitySchema -Connection $Connection -SqlPath $SqlPath
+    foreach ($file in 'views_local.sql', 'kri_summary.sql') {
         Invoke-SqlFile -Connection $Connection -Path (Join-Path $SqlPath $file)
     }
 }
@@ -326,8 +368,10 @@ function Invoke-IdentityCollection {
         One collector run: account + group snapshots and an incremental Security-log load.
     .DESCRIPTION
         Incremental load: only events with EventRecordID above the highest one already stored
-        are read. record_id is the primary key and rows are inserted with OR IGNORE, so a
-        rerun (or an overlap) never duplicates rows. Every value goes in through parameters.
+        in the current log epoch are read. (log_epoch, record_id) is the primary key and rows
+        are inserted with OR IGNORE, so a rerun (or an overlap) never duplicates rows. When the
+        log is cleared or reset, IDs restart low: the epoch goes up and the log is read from
+        the start. Every value goes in through parameters.
     .OUTPUTS
         The finished runs row.
     #>
@@ -363,30 +407,52 @@ INSERT INTO runs (started_at, host, status) VALUES (@started, @host, 'running')
                 -DataTable (New-RowTable -Columns $script:MemberColumns -Rows $members)
 
             # Incremental events ------------------------------------------------
-            $last = Get-ScalarValue $conn @'
-SELECT MAX(r) FROM (SELECT MAX(record_id) AS r FROM auth_event
-                    UNION ALL SELECT MAX(record_id) FROM account_change)
-'@
-            if ($null -eq $last) { $last = 0 }
+            # Current log epoch: the highest seen on any earlier run (failed ones included,
+            # since their events are kept) or on any stored event.
+            $epoch = Get-ScalarValue $conn @'
+SELECT MAX(e) FROM (SELECT MAX(COALESCE(log_epoch, 0)) AS e FROM runs WHERE run_id < @run
+                    UNION ALL SELECT MAX(log_epoch) FROM auth_event
+                    UNION ALL SELECT MAX(log_epoch) FROM account_change)
+'@ @{ run = $runId }
+            if ($null -eq $epoch) { $epoch = 0 }
 
-            # High-water mark of the whole log at the previous good run (not only the
-            # events we keep), so a rollover gap can be detected precisely.
+            # High-water mark of the whole log at the previous good run in this epoch (not
+            # only the events we keep), so a rollover gap or a reset can be detected precisely.
             $prevHigh = Get-ScalarValue $conn @'
 SELECT last_record_after FROM runs
-WHERE run_id < @run AND status IN ('success', 'warning')
+WHERE run_id < @run AND status IN ('success', 'warning') AND COALESCE(log_epoch, 0) = @epoch
 ORDER BY run_id DESC LIMIT 1
-'@ @{ run = $runId }
+'@ @{ run = $runId; epoch = $epoch }
 
             $range = Get-EventLogRecordRange -LogName $LogName
-            if ($null -ne $prevHigh -and $null -ne $range.Newest -and $range.Newest -lt $prevHigh) {
-                $notes.Add("Log newest record $($range.Newest) < previous high-water $prevHigh; log was cleared or reset")
+            $reset = $null -ne $prevHigh -and $null -ne $range.Newest -and $range.Newest -lt $prevHigh
+            if ($reset) {
+                # Record IDs restarted: read the new log from the start under a new epoch,
+                # so new events neither get skipped nor collide with stored IDs.
+                $epoch++
+                $notes.Add("Log newest record $($range.Newest) < previous high-water $prevHigh; log was cleared or reset. Reloading from the start as log epoch $epoch")
             }
             elseif ($null -ne $prevHigh -and $null -ne $range.Oldest -and $range.Oldest -gt $prevHigh + 1) {
                 $notes.Add("Log rolled over: records $($prevHigh + 1)-$($range.Oldest - 1) were lost before this run")
             }
 
+            # Saved before loading, so a run that fails mid-load still pins the epoch of
+            # the events it kept and the next run doesn't count the same reset twice.
+            Invoke-SqliteQuery -SQLiteConnection $conn -Query 'UPDATE runs SET log_epoch = @epoch WHERE run_id = @run' `
+                -SqlParameters @{ epoch = $epoch; run = $runId }
+
+            $last = 0
+            if (-not $reset) {
+                $last = Get-ScalarValue $conn @'
+SELECT MAX(r) FROM (SELECT MAX(record_id) AS r FROM auth_event WHERE log_epoch = @epoch
+                    UNION ALL SELECT MAX(record_id) FROM account_change WHERE log_epoch = @epoch)
+'@ @{ epoch = $epoch }
+                if ($null -eq $last) { $last = 0 }
+            }
+
             $parsed = @(Get-SecurityEventSince -LastRecordId $last -LogName $LogName |
                 ForEach-Object { ConvertFrom-SecurityEventXml -Xml $_.ToXml() })
+            foreach ($p in $parsed) { $p | Add-Member -NotePropertyName log_epoch -NotePropertyValue $epoch -Force }
             $auth   = @($parsed | Where-Object { $_.Table -eq 'auth_event' })
             $change = @($parsed | Where-Object { $_.Table -eq 'account_change' })
 

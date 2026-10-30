@@ -4,7 +4,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![Power BI](https://img.shields.io/badge/Power%20BI-F2C811?logo=powerbi&logoColor=black)
 [![Hyper-V](https://img.shields.io/badge/Hyper--V-Windows%2011-0078D4)](#building-the-lab-vm)
-![Tests](https://img.shields.io/badge/Pester%20tests-48%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/Pester%20tests-51%20passing-brightgreen)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 An end-to-end identity risk analytics pipeline. It collects account, group and authentication data from a Windows 11
@@ -39,7 +39,7 @@ measures how well they detect a labelled red team, using precision, recall and F
 
 | | Result |
 |---|---|
-| **Pipeline** | Collector → SQLite → SQL KRIs → Power BI, working end to end. On the synthetic sample, every red/amber KRI traces back to exactly one staged account, and 48 Pester tests check this. |
+| **Pipeline** | Collector → SQLite → SQL KRIs → Power BI, working end to end. On the synthetic sample, every red/amber KRI traces back to exactly one staged account, and 51 Pester tests check this. |
 | **Hygiene KRIs** | Can be computed reliably from Windows logs, as long as audit logging is verified first and collector gaps are tracked as a KRI. |
 | **Best detector (LANL)** | `fan_out` catches **19 of 45** red-team users in a list of 50, about **135× better than chance** (F1 0.40). |
 | **Highest precision (LANL)** | `combined_lateral`: 0.60 precision in a 20-user list. `combined_risk` is 5 for 5 at N = 5. |
@@ -91,7 +91,7 @@ flowchart LR
 | Reporting | Power BI (ODBC) | [powerbi/](powerbi/), [report/findings.md](report/findings.md) |
 | Testing | Pester 5 | [tests/](tests/) |
 
-Design highlights: incremental, idempotent loading keyed on `EventRecordID`; detection of gaps from log rollover and
+Design highlights: incremental, idempotent loading keyed on log epoch + `EventRecordID` (safe across log clears); detection of gaps from log rollover and
 log clearing; orphaned-SID handling; locale-safe matching by SID and GUID; and reproducible time references. See
 [ENGINEERING.md → Design notes](ENGINEERING.md#design-notes).
 
@@ -229,7 +229,7 @@ Steps:
    (N = 5, 10, 20, 50, 100, 250), and compare the flagged users with the red-team labels.
 7. **Summarise as KRIs.** Reduce each check to one row with a value, a threshold and a status. The dashboard and the
    findings report are built on those rows.
-8. **Test every step.** 48 Pester tests check each step against inputs whose correct answer is already known.
+8. **Test every step.** 51 Pester tests check each step against inputs whose correct answer is already known.
 
 ## The data
 

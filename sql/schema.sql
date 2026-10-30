@@ -1,5 +1,6 @@
 -- Identity analytics schema (Part 1 local collector + Part 2 LANL).
--- Safe to re-run: every object uses IF NOT EXISTS.
+-- Safe to re-run: every object uses IF NOT EXISTS. Databases created before log_epoch
+-- existed are upgraded by Initialize-IdentityDatabase (IdentityCollector.psm1).
 --
 -- Compatibility: this file and every VIEW in the project must parse on SQLite 3.8.8,
 -- the engine bundled with PSSQLite 1.1.0. SQLite parses the whole schema whenever a
@@ -21,11 +22,12 @@ CREATE TABLE IF NOT EXISTS runs (
   events_loaded      INTEGER,
   accounts           INTEGER,
   group_members      INTEGER,
-  last_record_before INTEGER,   -- highest EventRecordID in the DB when the run started
+  last_record_before INTEGER,   -- highest EventRecordID in the DB (this epoch) when the run started
   last_record_after  INTEGER,
   status             TEXT NOT NULL,   -- running | success | warning | failed
   notes              TEXT,            -- warnings such as a log rollover gap
-  error              TEXT
+  error              TEXT,
+  log_epoch          INTEGER          -- see auth_event; NULL on rows from before epochs existed (= 0)
 );
 
 CREATE TABLE IF NOT EXISTS account_snapshot (
@@ -51,8 +53,12 @@ CREATE TABLE IF NOT EXISTS group_membership (
 );
 CREATE INDEX IF NOT EXISTS ix_gm_run ON group_membership(run_id);
 
+-- EventRecordID restarts from a low number when the Security log is cleared (or the VM is
+-- restored to a checkpoint). log_epoch goes up by one each time the collector detects that,
+-- so (log_epoch, record_id) stays unique; the PK makes reloads within an epoch idempotent.
 CREATE TABLE IF NOT EXISTS auth_event (
-  record_id    INTEGER PRIMARY KEY,   -- Security log EventRecordID; PK makes reloads idempotent
+  log_epoch    INTEGER NOT NULL DEFAULT 0,
+  record_id    INTEGER NOT NULL,      -- Security log EventRecordID
   time_created TEXT NOT NULL,
   event_id     INTEGER NOT NULL,
   target_user  TEXT,
@@ -62,21 +68,24 @@ CREATE TABLE IF NOT EXISTS auth_event (
   sub_status   TEXT,
   source_ip    TEXT,
   process_name TEXT,
-  auth_package TEXT
+  auth_package TEXT,
+  PRIMARY KEY (log_epoch, record_id)
 );
 CREATE INDEX IF NOT EXISTS ix_auth_time ON auth_event(time_created);
 CREATE INDEX IF NOT EXISTS ix_auth_user ON auth_event(target_user);
 CREATE INDEX IF NOT EXISTS ix_auth_sid  ON auth_event(target_sid);
 
 CREATE TABLE IF NOT EXISTS account_change (
-  record_id    INTEGER PRIMARY KEY,
+  log_epoch    INTEGER NOT NULL DEFAULT 0,
+  record_id    INTEGER NOT NULL,
   time_created TEXT NOT NULL,
   event_id     INTEGER NOT NULL,
   actor        TEXT,
   target_user  TEXT,
   target_sid   TEXT,
   group_name   TEXT,
-  group_sid    TEXT
+  group_sid    TEXT,
+  PRIMARY KEY (log_epoch, record_id)
 );
 CREATE INDEX IF NOT EXISTS ix_change_time ON account_change(time_created);
 

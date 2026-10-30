@@ -55,11 +55,18 @@ Detailed guides that this page links to rather than repeats:
 ### Design notes
 
 - **Incremental and idempotent loading.** Each run reads only events with an `EventRecordID` higher than the highest
-  one stored. `record_id` is the primary key and rows are inserted with `OR IGNORE`, so an overlap or a rerun can't
-  duplicate data. Every value goes in through query parameters, never string concatenation.
+  one stored in the current **log epoch**. `(log_epoch, record_id)` is the primary key and rows are inserted with
+  `OR IGNORE`, so an overlap or a rerun can't duplicate data. Every value goes in through query parameters, never
+  string concatenation.
 - **Gap detection.** Each run stores the log's newest record ID as a high-water mark. If the oldest record still in
   the log is later than the previous mark, events were lost to rollover. If the newest record is earlier, the log was
-  cleared. Either case marks the run `warning` with a note.
+  cleared or the VM was restored to a checkpoint. Either case marks the run `warning` with a note.
+- **Log epochs.** Clearing the Security log (or restoring a checkpoint) restarts `EventRecordID` from a low number.
+  Without epochs, the collector would skip every new event, including the 1102 "log cleared" event, until the IDs
+  passed the old maximum, and new events reusing an old ID would be dropped as duplicates. So when a reset is
+  detected, the run raises `log_epoch` by one and reads the log from the start. The epoch is saved on the `runs` row
+  before events load, so a run that fails mid-load doesn't make the next run count the same reset twice. Databases
+  created before epochs existed are upgraded in place on the next run (existing rows become epoch 0).
 - **Orphaned SIDs.** `Get-LocalGroupMember` throws when a group contains a SID that no longer resolves. The collector
   falls back to ADSI and keeps the member as `Orphaned`, because that's a finding, not a crash.
 - **SQLite 3.8.8 compatibility.** PSSQLite bundles SQLite 3.8.8 (2015), and SQLite parses the whole schema whenever a
@@ -175,11 +182,11 @@ All tables are defined in `sql/schema.sql`. The same schema is used by the VM da
 
 | Table | Grain | Source |
 |---|---|---|
-| `runs` | One row per collector run: start/finish, status, events loaded, high-water marks, notes, error | The collector |
+| `runs` | One row per collector run: start/finish, status, events loaded, high-water marks, log epoch, notes, error | The collector |
 | `account_snapshot` | Account × run | `Get-LocalUser` (+ ADSI user flags) |
 | `group_membership` | Group member × run, including orphaned SIDs | `Get-LocalGroupMember`, with ADSI fallback |
-| `auth_event` | One row per 4624 / 4625 / 4648 / 4672 | Security log |
-| `account_change` | One row per 4720 / 4722–4726 / 4738 / 4740 / 4767 / 4732 / 4733 / 1102 | Security log |
+| `auth_event` | One row per 4624 / 4625 / 4648 / 4672, keyed on `(log_epoch, record_id)` | Security log |
+| `account_change` | One row per 4720 / 4722–4726 / 4738 / 4740 / 4767 / 4732 / 4733 / 1102, keyed on `(log_epoch, record_id)` | Security log |
 | `event_ref`, `logon_type_ref`, `status_code_ref`, `privileged_group` | Lookup tables | `schema.sql` |
 
 **LANL tables**
@@ -221,7 +228,7 @@ Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -SkipPublisherCheck
 Invoke-Pester .\tests -Output Detailed
 ```
 
-All 48 tests should pass in about 15 seconds, with no admin rights, VM or LANL download needed.
+All 51 tests should pass in about 15 seconds, with no admin rights, VM or LANL download needed.
 
 [Pester](https://pester.dev) is the standard test framework for PowerShell, much like pytest for Python or JUnit for
 Java. A test file is an ordinary PowerShell script named `*.Tests.ps1`. `Invoke-Pester` finds and runs those files,
@@ -268,12 +275,12 @@ run, but the Windows side is fake and predictable. For example, one test makes t
 `Access is denied` to check that the failed run is recorded properly. Another makes the oldest record in the log newer
 than the last one stored, to check that rollover is detected.
 
-### What the 48 tests cover
+### What the 51 tests cover
 
 | File | Tests | What it proves | Input |
 |---|---|---|---|
 | `Parser.Tests.ps1` | 9 | Event XML for 4624 / 4625 / 4740 / 4732 / 1102 is parsed into the right fields, read by name not position. Placeholder values (`-`, empty, the null SID `S-1-0-0`) become NULL. NTSTATUS codes are upper-cased and padded (`0x0` → `0x00000000`). | Saved event XML in `tests/fixtures/events/` |
-| `Collector.Tests.ps1` | 6 | A first run loads everything. A rerun loads only new events and never duplicates rows. An orphaned SID falls back to ADSI instead of crashing. A failed run is recorded as `failed`. Log rollover gets a `warning`. | Mocked Windows commands + fake event log |
+| `Collector.Tests.ps1` | 9 | A first run loads everything. A rerun loads only new events and never duplicates rows. An orphaned SID falls back to ADSI instead of crashing. A failed run is recorded as `failed`. Log rollover gets a `warning`. After a log clear, the log is reloaded from the start under a new epoch, including the 1102 event and an ID that collides with an old one, and a failed run doesn't make the same clear count twice. An old database is upgraded without losing rows. | Mocked Windows commands + fake event log |
 | `ViewsLocal.Tests.ps1` | 23 | Every local view and the KRI summary return exactly the expected rows: who is dormant, who is privileged, failure reasons, lockout timing, data-quality issues, red/amber/green statuses | `tests/fixtures/local_fixture.sql`, a hand-built database with known answers |
 | `Lanl.Tests.ps1` | 10 | End-to-end LANL import of a tiny gzip slice. Exact row counts at each step (read / in window / dropped / loaded), new user→computer pairs, and precision/recall against hand-calculated values | A generated mini `auth.txt.gz` / `redteam.txt.gz` |
 
@@ -330,7 +337,7 @@ Get-Content C:\ProgramData\IdentityAnalytics\collect.log -Tail 20
 | `runs.status` | Meaning | What to do |
 |---|---|---|
 | `success` | Completed with no gaps detected | Nothing |
-| `warning` | Completed, but `notes` reports a gap: events lost to log rollover (the oldest record is newer than the last stored mark), or the log was cleared (the newest record is older than the mark) | Rollover: enlarge the Security log or run more often. Cleared: check for event 1102, which is a finding in itself |
+| `warning` | Completed, but `notes` reports a gap: events lost to log rollover (the oldest record is newer than the last stored mark), or the log was cleared or the VM restored to a checkpoint (the newest record is older than the mark) | Rollover: enlarge the Security log or run more often. Cleared: nothing is lost; the run starts a new `log_epoch` and reloads the log from the start. Check for event 1102, which is a finding in itself |
 | `failed` | Threw an error, recorded in `runs.error`. Its partial snapshot is deleted | Fix the cause (below). The next run picks up from the last good high-water mark, so no events are lost |
 | `running` (on an old row) | The process was killed before it finished: the 1-hour task limit, or the VM stopped mid-run | Usually nothing. The next run compares only against earlier `success` / `warning` runs |
 

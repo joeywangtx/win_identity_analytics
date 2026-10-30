@@ -126,4 +126,91 @@ Describe 'Invoke-IdentityCollection' {
         $run.status | Should -Be 'warning'
         $run.notes  | Should -BeLike '*rolled over*90001-94999*'
     }
+
+    It 'reloads from the start of the log after a clear, without colliding with old record IDs' {
+        Invoke-IdentityCollection -Database $script:Db | Out-Null   # records 101-104, high-water 90000
+        Mock -ModuleName IdentityCollector Get-EventLogRecordRange { [pscustomobject]@{ Oldest = 1; Newest = 3 } }
+        $script:Log = @(
+            New-FakeEvent 1102 1
+            New-FakeEvent 4624 2
+            New-FakeEvent 4625 102   # same ID as a stored event from before the clear
+        )
+
+        $run = Invoke-IdentityCollection -Database $script:Db
+        $run.status        | Should -Be 'warning'
+        $run.notes         | Should -BeLike '*cleared*epoch 1*'
+        $run.events_loaded | Should -Be 3
+        $run.log_epoch     | Should -Be 1
+        Should -Invoke -ModuleName IdentityCollector Get-SecurityEventSince -ParameterFilter { $LastRecordId -eq 0 }
+
+        $r102 = Get-Rows $script:Db 'SELECT log_epoch FROM auth_event WHERE record_id = 102 ORDER BY log_epoch'
+        $r102.log_epoch | Should -Be @(0, 1)
+        # The 1102 "log cleared" event behind the red KRI is no longer skipped.
+        (Get-Rows $script:Db 'SELECT * FROM account_change WHERE event_id = 1102').Count | Should -Be 1
+
+        # The next run continues incrementally inside the new epoch.
+        Mock -ModuleName IdentityCollector Get-EventLogRecordRange { [pscustomobject]@{ Oldest = 1; Newest = 4 } }
+        $script:Log += New-FakeEvent 4624 103
+        $next = Invoke-IdentityCollection -Database $script:Db
+        $next.status             | Should -Be 'success'
+        $next.events_loaded      | Should -Be 1
+        $next.last_record_before | Should -Be 102
+        $next.log_epoch          | Should -Be 1
+    }
+
+    It 'does not count the same clear twice when the run that detected it failed' {
+        Invoke-IdentityCollection -Database $script:Db | Out-Null
+        Mock -ModuleName IdentityCollector Get-EventLogRecordRange { [pscustomobject]@{ Oldest = 1; Newest = 3 } }
+        $script:Log = @(New-FakeEvent 1102 1; New-FakeEvent 4624 2)
+        Mock -ModuleName IdentityCollector Get-SecurityEventSince { throw 'Access is denied' }
+        { Invoke-IdentityCollection -Database $script:Db } | Should -Throw
+
+        Mock -ModuleName IdentityCollector Get-SecurityEventSince {
+            $script:Log | Where-Object { $_.RecordId -gt $LastRecordId }
+        }
+        $run = Invoke-IdentityCollection -Database $script:Db
+        $run.status        | Should -Be 'success'
+        $run.log_epoch     | Should -Be 1
+        $run.events_loaded | Should -Be 2
+        Should -Invoke -ModuleName IdentityCollector Get-SecurityEventSince -ParameterFilter { $LastRecordId -eq 0 }
+        (Get-Rows $script:Db 'SELECT DISTINCT log_epoch FROM auth_event ORDER BY log_epoch').log_epoch | Should -Be @(0, 1)
+    }
+}
+
+Describe 'Initialize-IdentityDatabase migration' {
+    It 'upgrades a database from before log_epoch without losing rows' {
+        $db = Join-Path $TestDrive 'old-schema.db'
+        Invoke-SqliteQuery -DataSource $db -Query @'
+CREATE TABLE runs (run_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, host TEXT,
+  events_loaded INTEGER, accounts INTEGER, group_members INTEGER, last_record_before INTEGER,
+  last_record_after INTEGER, status TEXT NOT NULL, notes TEXT, error TEXT);
+CREATE TABLE auth_event (record_id INTEGER PRIMARY KEY, time_created TEXT NOT NULL, event_id INTEGER NOT NULL,
+  target_user TEXT, target_sid TEXT, logon_type INTEGER, status_code TEXT, sub_status TEXT, source_ip TEXT,
+  process_name TEXT, auth_package TEXT);
+CREATE INDEX ix_auth_time ON auth_event(time_created);
+CREATE TABLE account_change (record_id INTEGER PRIMARY KEY, time_created TEXT NOT NULL, event_id INTEGER NOT NULL,
+  actor TEXT, target_user TEXT, target_sid TEXT, group_name TEXT, group_sid TEXT);
+INSERT INTO runs (run_id, started_at, last_record_after, status) VALUES (1, '2026-10-24 02:00:00', 500, 'success');
+INSERT INTO auth_event (record_id, time_created, event_id, target_user) VALUES
+  (101, '2026-10-24 01:00:00', 4624, 'jsmith'), (102, '2026-10-24 01:05:00', 4625, 'jsmith');
+INSERT INTO account_change (record_id, time_created, event_id, actor) VALUES (103, '2026-10-24 01:10:00', 4740, 'IDLAB-VM$');
+'@
+
+        $conn = New-SQLiteConnection -DataSource $db
+        try { Initialize-IdentityDatabase -Connection $conn; Initialize-IdentityDatabase -Connection $conn }   # twice: idempotent
+        finally { $conn.Close(); $conn.Dispose() }
+
+        $auth = Get-Rows $db 'SELECT * FROM auth_event ORDER BY record_id'
+        $auth.record_id   | Should -Be @(101, 102)
+        $auth.log_epoch   | Should -Be @(0, 0)
+        $auth[0].target_user | Should -Be 'jsmith'
+        (Get-Rows $db 'SELECT * FROM account_change')[0].log_epoch | Should -Be 0
+        (Get-Rows $db 'PRAGMA table_info(runs)').name | Should -Contain 'log_epoch'
+        (Get-Rows $db "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ix_auth_time'").Count | Should -Be 1
+        (Get-Rows $db "SELECT name FROM sqlite_master WHERE name LIKE '%premigration%'").Count | Should -Be 0
+
+        # The new key accepts the same record_id in a later epoch.
+        Invoke-SqliteQuery -DataSource $db -Query "INSERT INTO auth_event (log_epoch, record_id, time_created, event_id) VALUES (1, 101, '2026-10-25 01:00:00', 4624)"
+        (Get-Rows $db 'SELECT * FROM auth_event WHERE record_id = 101').Count | Should -Be 2
+    }
 }
