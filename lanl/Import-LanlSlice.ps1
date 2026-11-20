@@ -40,7 +40,7 @@ param(
     [Parameter(Mandatory)]
     [string]$RedTeamPath,
 
-    [string]$Database = (Join-Path $PSScriptRoot '..\data\lanl.db'),
+    [string]$Database,   # default: ..\data\lanl.db
 
     [Parameter(ParameterSetName = 'Import')]
     [int[]]$BaselineDays = @(7),
@@ -64,6 +64,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Not a param() default: $PSScriptRoot is empty there under powershell.exe -File (Windows PowerShell).
+if (-not $Database) { $Database = Join-Path $PSScriptRoot '..\data\lanl.db' }
 Import-Module PSSQLite
 Import-Module (Join-Path $PSScriptRoot '..\collector\IdentityCollector.psm1') -Force
 $SqlDir = Join-Path $PSScriptRoot '..\sql'
