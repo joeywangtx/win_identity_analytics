@@ -35,6 +35,21 @@ from the main README, because the `.pbix` can't be viewed without Power BI.
 Use the same color meaning on every page: red = risk, amber = review, green = OK, grey = context. Add slicers for date
 and account on pages 2–3.
 
+## Screenshots
+
+The main README has commented-out image slots for these files. Export each page (File → Export → PDF, or a
+screenshot at 1600 px wide), save it under `powerbi/screenshots/`, then uncomment its line in the README:
+
+| File | Page | Where it appears in the README |
+|---|---|---|
+| `01-overview.png` | 1. Overview | Top of the page, under the summary |
+| `02-authentication.png` | 2. Authentication (VM) | Results → Lab VM |
+| `03-privileged-access.png` | 3. Privileged access & hygiene (VM) | Results → Lab VM |
+| `05-detection.png` | 5. Detection results (LANL) | Results → LANL enterprise data |
+
+Use the VM and LANL databases for the screenshots, not `sample.db`, so the images match the results tables. Check each
+image for real names before committing: the owner's Microsoft account appears in the VM data.
+
 ## Gotcha
 
 Power BI types each column from the driver's metadata. `v_kri_summary` casts `value` and `threshold` to REAL for this
