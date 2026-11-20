@@ -42,7 +42,8 @@ needs no product key:
 2. Choose **ISO – Enterprise**, 64-bit, your language. It needs a short registration form.
 3. Save it as `C:\HyperV\ISO\Win11_Eval.iso`. It's about 5–6 GB.
 
-Enterprise also makes a **local account** easy during setup (step 4), and this project is about local accounts.
+Enterprise also lets you skip the Microsoft account and create a **local account** during setup. This lab used a
+Microsoft account and added a local admin afterwards (step 4); either works.
 
 > Alternative: the normal Windows 11 ISO from <https://www.microsoft.com/software-download/windows11>. Choose
 > "I don't have a product key" and pick Pro. It works unactivated (watermark, limited personalisation), but recent
@@ -100,14 +101,25 @@ vmconnect localhost IDLAB-VM
    empty disk → Next. It reboots a few times.
 3. Out-of-box setup (OOBE):
    - Region and keyboard: your choice.
-   - Enterprise: **Sign-in options → Domain join instead**. That creates a local account.
-   - User name: **`labadmin`**. Give it a password you'll remember, and answer the three security questions with junk.
+   - Sign in with your **Microsoft account**. Setup makes it the first administrator.
    - Privacy settings: turn everything off.
-4. After you reach the desktop, **rename the computer** so it matches the sample data and docs (VM, admin PowerShell):
+4. After you reach the desktop, create **`labadmin`**, a local admin account. PowerShell Direct (step 7) and the
+   export need a local `IDLAB-VM\labadmin` credential; a Microsoft account doesn't work well there. Then **rename the
+   computer** so it matches the sample data and docs (VM, admin PowerShell):
 
    ```powershell
+   $pw = Read-Host 'Password for labadmin' -AsSecureString
+   New-LocalUser -Name labadmin -Password $pw
+   Add-LocalGroupMember -SID 'S-1-5-32-544' -Member labadmin   # Administrators
    Rename-Computer -NewName IDLAB-VM -Restart
    ```
+
+   `New-LocalUser` silently sets **"password not required"** on the account, which lets its password be made blank.
+   This lab left the flag in place, and the collector reports it as a real finding
+   ([findings, item 2](report/findings.md#2-the-labs-own-admin-account-allows-an-empty-password)). On any machine you
+   care about, clear it straight away with `net user labadmin /passwordreq:yes`.
+   - **The Microsoft account's password never expires locally.** It's managed online, so the "password never expires"
+     KRI counts it. Treat it as an accepted exception.
 
 ## 5. Prepare Windows (VM, admin PowerShell)
 
@@ -165,11 +177,59 @@ Follow [ENGINEERING.md, Part 1](ENGINEERING.md#part-1-collector-in-the-vm) from 
 cd C:\Lab\identity-analytics
 .\collector\Setup-AuditPolicy.ps1 -SetLockoutPolicy
 .\collector\collect.ps1 -Verbose
-.\collector\Register-Task.ps1 -At 02:00
-.\collector\Generate-Activity.ps1 -Action Setup
+.\collector\Register-Task.ps1 -At 02:00                # collector, daily as SYSTEM
+.\collector\Generate-Activity.ps1 -Action Setup        # test accounts and their starting state
+.\collector\Register-Task.ps1 -Activity -At 12:00      # staged daily activity, as SYSTEM
+Start-ScheduledTask -TaskName IdentityAnalytics-Activity; Start-Sleep 30
+Get-ScheduledTaskInfo -TaskName IdentityAnalytics-Activity | Format-Table LastRunTime, LastTaskResult   # want 0
+Import-Csv .\data\activity\staged_activity.csv | Select-Object -Last 8 | Format-Table   # want today's logon rows
 ```
 
+Keep the `Format-Table` on each line. Without it, PowerShell prints the CSV rows under the first command's columns, and
+they show as blank lines. If `LastTaskResult` isn't 0 or there are no new `logon` rows, see
+[ENGINEERING.md, Is the staged activity running?](ENGINEERING.md#is-the-staged-activity-running).
+
+The test-account passwords are kept in `data\activity\credentials.dat`, encrypted for this machine and readable only
+by Administrators and SYSTEM, so any admin can run the scripts and the activity task needs no stored password.
+Without this task, the test accounts log on once and never again, and the lockout, failure and dormancy checks have
+nothing to find.
+
 Then take a second checkpoint: `Checkpoint-VM -Name IDLAB-VM -SnapshotName 'collector-ready'` (host).
+
+### Staged scenario
+
+The daily task covers normal use. These one-off steps are run by hand, on top of it (VM, admin PowerShell, in
+`C:\Lab\identity-analytics`). Every step is logged to `data\activity\staged_activity.csv`.
+
+| Day | Command | What it should trigger |
+|---|---|---|
+| 0 | `Generate-Activity.ps1 -Action Setup` | Dormant `dormant_alice` in Administrators (red), `dormant_bob` in Backup Operators, `temp_contractor` with no password required (red), `svc_backup` password never expires (amber) |
+| 1 | `Generate-Activity.ps1 -Action GrantAdmin -Account helpdesk_tom` | A privileged group change |
+| 1 | `Generate-Activity.ps1 -Action Lockout -Account temp_contractor` | A lockout after 5 quick failures |
+| 2 | `Generate-Activity.ps1 -Action Disable -Account mjones` | Account lifecycle |
+| 3 | `Generate-Activity.ps1 -Action Delete -Account dormant_bob` | Account deleted (4726), and removed from Backup Operators (4733), a privileged group change. No orphaned SID: deleting a *local* account also removes it from every local group. Orphans come from domain or cloud accounts deleted elsewhere, so on the VM that KRI stays green and only the sample database shows it |
+| 4+ | `Generate-Activity.ps1 -Action Lockout -Account temp_contractor` | A second lockout |
+| 7 | `Generate-Activity.ps1 -Action RevokeAdmin -Account helpdesk_tom` | The temporary admin removed a week later |
+
+Export the day after the last step, once the next collector run has loaded it. The 7-day KRIs count back 7 days from
+the latest run, so every extra day drops the earliest steps out of them. The event views (`v_lockouts`,
+`v_privileged_group_changes`, `v_account_lifecycle`) keep the whole history either way.
+
+Count days by your local date. `staged_activity.csv` is in UTC, so an evening step can show the next day's date.
+Each step prints what it did (e.g. `lockout temp_contractor attempts=6 locked=True`) and adds a row to the log. If
+Lockout says `No lockout threshold set`, run `Setup-AuditPolicy.ps1 -SetLockoutPolicy` first. `locked=False` means
+the lockout didn't happen; check `net accounts`.
+
+**Already collecting with an older version of the scripts?** Copy the project in again (step 7), then re-run
+`Generate-Activity.ps1 -Action Setup`. It creates nothing new, but fixes the starting state. If the old
+`credentials.clixml` was made by a different Windows user and can't be read ("Key not valid for use in specified
+state"), it gives the test accounts new random passwords and logs a `reset_password` row for each. It also clears the "password
+not required" flag that `New-LocalUser` sets on every account it creates (except on `temp_contractor`, where it's
+intended), and adds `dormant_alice` and `dormant_bob` to their groups. Then register the activity task and start the
+scenario from day 1.
+
+A fresh VM can't produce the "password older than 365 days" KRI: Windows doesn't let you backdate a password, so
+`old_pwd_carl`'s password is always new. That KRI is only shown by the sample database.
 
 **The VM only collects while it's running.** A paused or stopped VM generates no events, and the task runs late on
 the next start (`StartWhenAvailable`). Two options:
@@ -178,8 +238,7 @@ the next start (`StartWhenAvailable`). Two options:
   (e.g. `-At 12:00`).
 - Have it start with the laptop: `Set-VM IDLAB-VM -AutomaticStartAction Start -AutomaticStopAction Save` (host).
 
-Daily routine: `.\collector\Generate-Activity.ps1 -Action Daily` inside the VM, plus the staged events in the plan
-(admin add/remove a week apart, lockouts, disable/delete).
+Both tasks follow the same rule: if the VM was off at the scheduled time, the task runs when it next starts.
 
 ### Get the database out (host)
 
@@ -212,7 +271,7 @@ Remove Hyper-V too, if you won't use it again: `Disable-WindowsOptionalFeature -
 | Problem | Fix |
 |---|---|
 | "This PC can't run Windows 11" during setup | Check TPM is on (`Get-VMSecurity IDLAB-VM`), Secure Boot template is `MicrosoftWindows`, 2+ CPUs, 4 GB RAM (not dynamic) |
-| Setup insists on a Microsoft account | Take the VM offline during OOBE: `Disconnect-VMNetworkAdapter -VMName IDLAB-VM` (host), go back one screen and continue. A local account is offered offline. Reconnect afterwards: `Connect-VMNetworkAdapter -VMName IDLAB-VM -SwitchName 'Default Switch'` |
+| You'd rather not use a Microsoft account | Take the VM offline during OOBE: `Disconnect-VMNetworkAdapter -VMName IDLAB-VM` (host), go back one screen and continue. A local account is offered offline. Reconnect afterwards: `Connect-VMNetworkAdapter -VMName IDLAB-VM -SwitchName 'Default Switch'` |
 | Boots to PXE / "No operating system was loaded" | You missed "Press any key". Turn off, start, press a key straight away |
 | `New-PSSession -VMName` fails | The VM must be running and signed in at least once. Use `IDLAB-VM\labadmin`, and check the Guest Service Interface is on |
 | No internet in the VM | `Get-VMNetworkAdapter IDLAB-VM`. It should be on `Default Switch`. Restarting the host's Hyper-V service usually fixes Default Switch NAT |

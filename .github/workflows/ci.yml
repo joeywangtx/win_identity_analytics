@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]   # Windows PowerShell 5.1 (what the collector runs on) and PowerShell 7
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install modules
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSSQLite -Scope CurrentUser -Force
+          Get-Module -ListAvailable Pester, PSSQLite | Format-Table Name, Version
+
+      # Lanl.Tests.ps1 skips itself without the sqlite3 CLI; in CI it must run.
+      - name: Install sqlite3
+        run: |
+          choco install sqlite --no-progress -y
+          sqlite3 -version
+          if ($LASTEXITCODE) { throw 'sqlite3 not on PATH' }
+
+      - name: Run Pester tests
+        run: |
+          Import-Module Pester -MinimumVersion 5.5
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'tests'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          $c.TestResult.Enabled = $true
+          $c.TestResult.OutputPath = 'test-results.xml'
+          Invoke-Pester -Configuration $c
+
+      - name: Quick start against the sample database
+        run: |
+          sqlite3 -header -column sample/sample.db "SELECT indicator, value, threshold, status FROM v_kri_summary;"
+          if ($LASTEXITCODE) { throw 'sample.db query failed' }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shell }}
+          path: test-results.xml

@@ -6,13 +6,14 @@ and how to read its results, see [README.md](README.md).
 ## Contents
 
 1. [Architecture](#architecture)
-2. [Requirements and installation](#requirements-and-installation)
+2. [Requirements and installation](#requirements-and-installation): [installing PowerShell 7](#installing-powershell-7)
 3. [Configuration](#configuration)
 4. [Running](#running): [sample](#sample-database), [collector](#part-1-collector-in-the-vm), [LANL](#part-2-lanl-import), [Power BI](#part-3-power-bi)
 5. [Schema reference](#schema-reference)
-6. [Testing with Pester](#testing-with-pester)
-7. [Debugging and troubleshooting](#debugging-and-troubleshooting)
-8. [Repository layout](#repository-layout)
+6. [Data reference](#data-reference): [KRI thresholds](#kri-thresholds), [sample contents](#sample-database-contents), [LANL slice](#lanl-slice), [lab VM run log](#lab-vm-run-log)
+7. [Testing with Pester](#testing-with-pester)
+8. [Debugging and troubleshooting](#debugging-and-troubleshooting)
+9. [Repository layout](#repository-layout)
 
 Detailed guides that this page links to rather than repeats:
 
@@ -45,7 +46,7 @@ Detailed guides that this page links to rather than repeats:
 | `collector/collect.ps1` | VM, daily as SYSTEM | Thin entry point: imports the module, runs one collection, writes `collect.log`, and rethrows on failure so the task result is non-zero |
 | `collector/Setup-AuditPolicy.ps1` | VM, once | Audit subcategories by GUID, 1 GB Security log, optional lockout policy, `auditpol` evidence |
 | `collector/Generate-Activity.ps1` | VM, setup + daily | Test accounts and staged activity, logged to `staged_activity.csv` |
-| `collector/Register-Task.ps1` | VM, once | Registers the `IdentityAnalytics-Collect` daily task |
+| `collector/Register-Task.ps1` | VM, once | Registers the `IdentityAnalytics-Collect` daily task (SYSTEM), and with `-Activity` the `IdentityAnalytics-Activity` daily task (also SYSTEM) |
 | `lanl/Import-LanlSlice.ps1` | Host | Streams the gzip, filters the window, bulk-loads with `sqlite3 .import`, then runs `views_lanl.sql` |
 | `sql/schema.sql` | Both | Tables, indexes, lookup tables |
 | `sql/views_local.sql`, `sql/kri_summary.sql` | Both | Local views and KRI rows (persistent views, SQLite 3.8.8-compatible) |
@@ -73,6 +74,10 @@ Detailed guides that this page links to rather than repeats:
   connection opens. A single view using window functions, `IIF` or UPSERT would break the collector. So every
   persistent view uses 3.8.8-compatible SQL. The LANL analysis, which needs window functions, runs in the modern
   `sqlite3` CLI and writes its results to plain tables.
+- **Script paths resolved in the body.** Windows PowerShell 5.1 leaves `$PSScriptRoot` empty in an advanced script's
+  `param()` defaults when it's started with `powershell.exe -File`, which is how scheduled tasks start it. So path
+  defaults such as `-DataDir` and `-Database` are left empty in `param()` and filled in on the first lines of the
+  script.
 - **Reproducible "now".** Views measure time from the latest successful run (`v_reference_run`), not the wall clock.
   Reopening an old database gives the same answers.
 - **UTC everywhere.** All timestamps are stored as UTC text.
@@ -84,7 +89,7 @@ Detailed guides that this page links to rather than repeats:
 
 | Tool | Where | Why | Install |
 |---|---|---|---|
-| Windows PowerShell 5.1 or PowerShell 7 | Host and VM | Everything | Built in (5.1) |
+| Windows PowerShell 5.1 or PowerShell 7 | Host and VM | Everything. Scheduled tasks always use 5.1 | Built in (5.1). PowerShell 7: [below](#installing-powershell-7) |
 | PSSQLite 1.1.0 | Host: CurrentUser. VM: **AllUsers** | SQLite access from PowerShell | `Install-Module PSSQLite -Scope CurrentUser` (host) / `-Scope AllUsers` (VM) |
 | Pester 5.5+ | Host | Tests | `Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -SkipPublisherCheck` |
 | sqlite3 CLI 3.25+ | Host | LANL bulk import and window functions, quick inspection | Download from <https://sqlite.org/download.html> and add to PATH |
@@ -92,6 +97,65 @@ Detailed guides that this page links to rather than repeats:
 | Power BI Desktop + 64-bit SQLite ODBC driver | Host | Part 3 | See [powerbi/README.md](powerbi/README.md) |
 
 Pester and sqlite3 aren't needed in the VM. Tests and the LANL import run on the host.
+
+### Installing PowerShell 7
+
+PowerShell 7 doesn't upgrade Windows PowerShell 5.1. It installs **next to it**. 5.1 (`powershell.exe`) is part of
+Windows and stays; 7 is a separate program (`pwsh.exe`) with its own folder, profile and settings. You can use either
+for this project: all 51 tests pass on both, and CI runs both.
+
+**Install** (host, any PowerShell). Prefer the MSI-based install over the Microsoft Store:
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget
+```
+
+This installs to `C:\Program Files\PowerShell\7\` and updates through winget (`winget upgrade Microsoft.PowerShell`).
+The Microsoft Store version works for interactive use, but it lives in a protected `WindowsApps` folder that the
+SYSTEM account can't start programs from. To see which one you have:
+
+```powershell
+(Get-Command pwsh).Source   # ...\PowerShell\7\pwsh.exe = MSI; ...\WindowsApps\pwsh.exe = Store
+```
+
+**Open it:** Start menu → *PowerShell 7*, or type `pwsh`. In Windows Terminal, set it as the default profile under
+Settings → Startup. VS Code picks it up automatically for `.ps1` files once it's installed.
+
+**Modules.** PowerShell 7 also loads modules from the Windows PowerShell folders, so modules you installed under 5.1
+(PSSQLite, Pester) normally work without reinstalling. Check, and install any that are missing, from `pwsh`:
+
+```powershell
+Get-Module -ListAvailable Pester, PSSQLite | Format-Table Name, Version, ModuleBase
+Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force -SkipPublisherCheck   # if missing
+Install-Module PSSQLite -Scope CurrentUser -Force                                          # if missing
+```
+
+**Run the tests in 7:**
+
+```powershell
+pwsh
+cd C:\Work\Internship\win_identity_analytics
+Invoke-Pester .\tests
+```
+
+**What stays on 5.1, and why:**
+
+- **The scheduled tasks.** `Register-Task.ps1` always points the tasks at Windows PowerShell 5.1
+  (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`), even when you run it from 7. 5.1 is on every
+  machine, SYSTEM can always start it, and it's what the collector was run on for the lab results. To run the tasks
+  on 7 instead, pass the MSI path: `Register-Task.ps1 -PowerShellExe 'C:\Program Files\PowerShell\7\pwsh.exe'`.
+  A Store path is refused.
+- **The VM.** Nothing in the VM needs 7, so it isn't installed there. If you do install it, the tasks still use 5.1
+  unless you pass `-PowerShellExe`.
+
+**Differences that matter here:**
+
+- **Default file encoding.** 7 writes UTF-8 without a BOM; 5.1's `Set-Content` writes the system code page and
+  `Out-File` writes UTF-16. The scripts ask for UTF-8 explicitly, so their files (`collect.log`,
+  `staged_activity.csv`) read the same on both; the only difference is that 5.1 adds a byte-order mark.
+- **`&&` and `||`** work in 7 but are parse errors in 5.1. Avoid them in scripts that must run on both.
+- **Pester 3.4** is built into 5.1 only, so the old-Pester conflict described under
+  [Useful commands](#useful-commands) doesn't happen in 7.
 
 ## Configuration
 
@@ -102,9 +166,10 @@ Pester and sqlite3 aren't needed in the VM. Tests and the LANL import run on the
 | Lockout policy | 5 attempts, 15-minute window, 15-minute duration | `Setup-AuditPolicy.ps1 -SetLockoutPolicy` |
 | Collector database | `%ProgramData%\IdentityAnalytics\identity.db` | `collect.ps1 -Database`, `Register-Task.ps1 -Database` |
 | Collector log | `%ProgramData%\IdentityAnalytics\collect.log` | `collect.ps1 -LogFile` |
-| Task schedule | Daily at 02:00 local, as SYSTEM, 1-hour limit, runs late if missed | `Register-Task.ps1 -At` |
+| Task output logs | Collector: `task.log` next to the database. Activity: `data\activity\task.log` | Set by `Register-Task.ps1` |
+| Task schedule | Collector: daily at 02:00 local, as SYSTEM. Activity: daily at 12:00, as SYSTEM. Both: 1-hour limit, run late if missed | `Register-Task.ps1 -At` (add `-Activity` for the activity task) |
 | Dormancy threshold | 30 days | `sql/views_local.sql` |
-| KRI thresholds and severities | See the KRI table in the README | `sql/kri_summary.sql` |
+| KRI thresholds and severities | See [KRI thresholds](#kri-thresholds) | `sql/kri_summary.sql` |
 | LANL windows | Baseline day 7, detection day 8 | `Import-LanlSlice.ps1 -BaselineDays -DetectionDays` |
 | LANL orientation filter | `LogOn` only | `Import-LanlSlice.ps1 -KeepAllOrientations` (the SQL still analyses `LogOn` only) |
 | Top-N cut-offs | 5, 10, 20, 50, 100, 250 | `sql/views_lanl.sql` |
@@ -145,14 +210,14 @@ only**. `Setup-AuditPolicy.ps1` and `Generate-Activity.ps1` refuse to run on a n
 Install-Module PSSQLite -Scope AllUsers            # AllUsers: the task runs as SYSTEM
 .\collector\Setup-AuditPolicy.ps1 -SetLockoutPolicy # audit subcategories, 1 GB Security log, lockout policy
 .\collector\collect.ps1 -Verbose                   # first run → %ProgramData%\IdentityAnalytics\identity.db
-.\collector\Register-Task.ps1 -At 02:00            # daily as SYSTEM
-.\collector\Generate-Activity.ps1 -Action Setup    # test accounts
+.\collector\Register-Task.ps1 -At 02:00            # collector, daily as SYSTEM
+.\collector\Generate-Activity.ps1 -Action Setup    # test accounts and their starting state (safe to re-run)
+.\collector\Register-Task.ps1 -Activity -At 12:00  # Generate-Activity -Action Daily, daily as SYSTEM
 ```
 
-Then each day, run `.\collector\Generate-Activity.ps1 -Action Daily`, plus the staged events in
-[Project_Plan.md](Project_Plan.md) §1.6 (admin add and remove a week apart, lockouts, disable/delete). Collect for at
-least 14 days, then copy `identity.db` and `staged_activity.csv` to `data/` on the host ([VM_SETUP.md](VM_SETUP.md)
-step 8).
+Then run the one-off steps in the [staged scenario](VM_SETUP.md#staged-scenario) (admin add and remove, lockouts,
+disable, delete). The day after the last step (once the collector has loaded it), copy `identity.db` and `staged_activity.csv` to
+`data/` on the host ([VM_SETUP.md](VM_SETUP.md) step 8).
 
 ### Part 2: LANL import
 
@@ -220,6 +285,112 @@ All tables are defined in `sql/schema.sql`. The same schema is used by the VM da
 | `v_data_quality` | Orphaned SIDs, accounts with no description, events for accounts missing from the snapshot |
 | `v_run_history` | Collector health |
 | `v_kri_summary` | One row per KRI: value, threshold, status |
+
+## Data reference
+
+### KRI thresholds
+
+| KRI | Status rule |
+|---|---|
+| Dormant privileged accounts, password not required, Security log cleared (30 days) | > 0 → red |
+| Password never expires, passwords older than 365 days, orphaned SIDs, failed collector runs (14 days), privileged group changes (7 days) | > 0 → amber |
+| Lockouts in last 7 days | > 3 → amber |
+| LANL users with 5+ new computer pairs | > 10 → amber |
+| LANL NTLM share of logons | > 5% → amber |
+| Failed logons (7 days), LANL best F1 | Context only (`info`) |
+
+Thresholds are defined in [sql/kri_summary.sql](sql/kri_summary.sql). The 7-day KRIs count back from the latest
+successful run, so a scenario longer than 7 days never appears in one window; the event views keep the full history.
+
+### Sample database contents
+
+Built by [sample/New-SampleDatabase.ps1](sample/New-SampleDatabase.ps1). Fully synthetic and deterministic: the same
+`-Seed` always produces the same database. The LANL half is written in the real LANL file format and loaded through
+the real importer, so the sample exercises the production code path.
+
+**Local half:** 21 daily runs (2–22 October 2026) for host `IDLAB-VM`, with 14 accounts, 515 authentication events
+and 9 account changes:
+
+| Account | Scenario | Expected finding |
+|---|---|---|
+| `labadmin` | Lab owner, daily admin logons | None (the normal case) |
+| `jsmith`, `mjones`, `akim` | Regular users, weekday logons, occasional typos | Background failed-logon noise. `mjones` is disabled on day 13 |
+| `helpdesk_tom` | Added to Administrators on day 4, removed on day 11 | Two privileged group changes by `labadmin` |
+| `svc_backup` | Service logons around the clock, password never expires, password set 2025-11 | Password never expires |
+| `svc_report` | Service account with no description | Data-quality issue |
+| `temp_contractor` | Password not required; locked out twice (days 6 and 17) | Password not required (red), 2 lockouts |
+| `old_pwd_carl` | Password last set 2025-03 | Password older than 365 days |
+| `dormant_alice` | In Administrators, never logs on | **Dormant privileged account** (red) |
+| `dormant_bob` | Never logs on; deleted on day 14 but left in Backup Operators, as a deleted domain account would be | Orphaned SID in a privileged group |
+| *(nonexistent `admin`)* | Password-spray noise from 192.168.56.50 every third day | Failures for an unknown user |
+
+Run 9 is recorded as **failed** (the VM was suspended), so the collector-health KRI has a real case to catch.
+
+**LANL half:** 300 users across two days, 33,665 lines read and 18,349 kept. A red team of **6 users** moves laterally
+to 8–20 never-seen computers each. Decoy groups make detection non-trivial:
+
+| Decoy group | Behaviour | Indicator it fools |
+|---|---|---|
+| 8 admins | High fan-out every day, including the baseline | `fan_out` (not `new_pairs`, because the pairs aren't new) |
+| 12 "movers" | Start using a few new servers on the detection day | `new_pairs` at larger N |
+| 7 stale-password users | Bursts of failed NTLM logons | `failures`, `failure_burst` |
+| 5 service accounts | Active all day; one logs on interactively | `service_interactive` |
+| ~10% of users | Still on NTLM | `ntlm_logons` |
+
+**Sample KRIs:**
+
+| KRI | Value | Status | Cause |
+|---|---|---|---|
+| Dormant privileged accounts | 1 | 🔴 red | `dormant_alice` in Administrators, never logged on |
+| Password not required | 1 | 🔴 red | `temp_contractor` |
+| Password never expires | 1 | 🟠 amber | `svc_backup` |
+| Passwords older than 365 days | 1 | 🟠 amber | `old_pwd_carl` (set 2025-03) |
+| Orphaned SIDs in groups | 1 | 🟠 amber | Deleted `dormant_bob` still in Backup Operators |
+| Failed collector runs (14 days) | 1 | 🟠 amber | Run 9 (VM suspended) |
+| Lockouts in last 7 days | 1 | 🟢 green | `temp_contractor` on 18 Oct (below the threshold of 3) |
+| Privileged group changes (7 days) | 0 | 🟢 green | `helpdesk_tom`'s changes on days 4 and 11 fall outside the window |
+| Security log cleared (30 days) | 0 | 🟢 green | None |
+| Failed logons in last 7 days | 23 | info | Typos, spraying and the lockout |
+| LANL users with 5+ new pairs | 12 | 🟠 amber | 6 red team + 6 movers |
+| LANL NTLM share | 10.37% | 🟠 amber | ~10% of synthetic users on NTLM |
+| LANL best indicator F1 | 0.909 | info | `new_pairs` / `combined_risk` at N = 5 |
+
+On the sample, `new_pairs` and `combined_risk` reach precision 1.0 and recall 0.83 at N = 5, and recall 1.0 at
+N = 10. That's expected, because the synthetic red team is built to be findable.
+
+### LANL slice
+
+Baseline day 7, detection day 8 (why: [README → The data](README.md#the-data); per-day red-team counts:
+[lanl/README.md](lanl/README.md#choosing-the-slice)). Each import records these counts in `lanl_import_log`:
+
+| Step | Rows |
+|---|---|
+| Lines read (stopped at the end of day 8) | 152,468,275 |
+| Before the window (days 0–6, skipped) | 113,699,303 |
+| In the window (days 7–8) | 38,768,971 |
+| Removed: not a logon (logoffs, Kerberos ticket requests) | 22,494,657 |
+| Removed: computer accounts | 10,053,920 |
+| **Kept for analysis** | **6,220,394** (3.12M baseline, 3.10M detection) |
+
+### Lab VM run log
+
+24 collector runs, 24 October – 17 November 2026, all `success`, at up to about 640 events per day. There was no 02:00
+run on 1 November or 11 November (VM off or rebooting); the next run loaded the missed events both times.
+
+The first 12 days showed that the staged daily activity only ran when started by hand, so the test accounts logged on
+once and the scenario steps never happened. The activity was then made a scheduled task
+([VM_SETUP.md](VM_SETUP.md#staged-scenario)), and the scenario was re-run on the same VM. Dates are local (UTC−8):
+
+| Date (2026) | Step |
+|---|---|
+| 6 November | Day 0: starting state re-applied (new test-account passwords, password flags, dormant group members) |
+| 6–7 November | No staged activity: the new SYSTEM task failed on start-up (`$PSScriptRoot` empty under `-File`; see [Is the staged activity running?](#is-the-staged-activity-running)) |
+| 8 November | Daily activity running as a scheduled task. Day 1: `helpdesk_tom` added to Administrators, `temp_contractor` locked out |
+| 9 November | Day 2: `mjones` disabled |
+| 10–11 November | VM rebooted overnight for patching. Neither task ran on 11 November until started by hand that evening. No events were lost |
+| 11 November | Day 3, a day late: `dormant_bob` deleted. Windows also removed it from Backup Operators (4733), so no orphaned SID was left |
+| 15 November | Day 4, second lockout of `temp_contractor` (planned for 12 November). Day 7: temporary admin removed by a one-time SYSTEM task |
+| 17 November | Last collector run; database exported |
 
 ## Testing with Pester
 
@@ -296,6 +467,11 @@ Invoke-Pester .\tests -FullNameFilter '*incremental*'              # tests whose
 Import-Module Pester -MinimumVersion 5.5; Invoke-Pester .\tests   # if an old Pester 3.x is also installed
 ```
 
+**CI.** [.github/workflows/ci.yml](.github/workflows/ci.yml) runs every test on `windows-latest` under both Windows
+PowerShell 5.1 and PowerShell 7, on each push to `main` and each pull request. It installs Pester, PSSQLite and the
+`sqlite3` CLI, so the LANL tests run instead of skipping. It then runs the README's quick-start query against
+`sample.db` and uploads the test results.
+
 Windows ships with Pester 3.4, which uses older syntax and can't run these tests. That's why the install command asks
 for 5.5 or later, and `-SkipPublisherCheck` is needed to install it next to the built-in copy.
 
@@ -332,6 +508,73 @@ Get-Content C:\ProgramData\IdentityAnalytics\collect.log -Tail 20
 - **`Get-VM` says "You do not have the required permission"**: run it in an Administrator PowerShell, or add your
   account to the local *Hyper-V Administrators* group.
 
+### Is the staged activity running?
+
+The activity task writes nothing to a database. Its record is `data\activity\staged_activity.csv`, one row per action.
+Check it in three layers: the log (the task ran and the logons succeeded), the Security log (Windows recorded them),
+and `identity.db` (the collector loaded them).
+
+```powershell
+# VM: did the task run, and exit cleanly?
+Get-ScheduledTaskInfo -TaskName IdentityAnalytics-Activity | Format-Table LastRunTime, LastTaskResult, NextRunTime
+
+# VM: one row per day (UTC) of the staged log
+Import-Csv C:\Lab\identity-analytics\data\activity\staged_activity.csv |
+  Group-Object { $_.time_utc.Substring(0,10) } | Sort-Object Name | ForEach-Object {
+    $logons = $_.Group | Where-Object action -eq 'logon'
+    [pscustomobject]@{
+      DayUtc   = $_.Name
+      Logons   = @($logons).Count
+      Accounts = ($logons.account | Sort-Object -Unique) -join ', '
+      Other    = (($_.Group | Where-Object action -ne 'logon') | ForEach-Object { "$($_.action):$($_.account)" }) -join ', '
+    } } | Format-Table -AutoSize -Wrap
+
+# VM: the same accounts in the database, per day and event
+Invoke-SqliteQuery -DataSource C:\ProgramData\IdentityAnalytics\identity.db -Query @"
+SELECT substr(time_created,1,10) AS day, target_user, event_id, logon_type, COUNT(*) AS n
+FROM auth_event
+WHERE target_user IN ('jsmith','mjones','akim','helpdesk_tom','svc_backup','svc_report',
+                      'temp_contractor','old_pwd_carl','dormant_alice','dormant_bob')
+GROUP BY 1,2,3,4 ORDER BY 1,2
+"@ | Format-Table -AutoSize
+```
+
+**How to read them:**
+
+- **A normal day** has `logon` rows for jsmith, akim, helpdesk_tom, svc_backup and svc_report, and mjones until it's
+  disabled. temp_contractor and old_pwd_carl sign in on about one day in four. dormant_alice and dormant_bob never
+  do. Most days also have a `failed_logon` row.
+- **A missing account on one day** means its logon failed. `Daily` only logs successful logons, so the usual causes
+  are a lockout in progress or a stored password that no longer matches (re-run `-Action Setup`).
+- **No rows at all for a day**, not even `failed_logon`, means the task didn't run or threw before signing anyone in.
+  Check `LastTaskResult`, then run `Generate-Activity.ps1 -Action Daily` by hand.
+- **Every `logon` row** should match at least one 4624 in `auth_event` (type 2 interactive, type 3 network) once the
+  next collector run has loaded it. Typos show as 4625.
+
+**It works by hand but the task returns 1.** Look at the end of the task's output log first:
+
+```powershell
+Get-Content C:\Lab\identity-analytics\data\activity\task.log -Tail 30          # activity task
+Get-Content C:\ProgramData\IdentityAnalytics\task.log -Tail 30                  # collector task
+```
+
+`Register-Task.ps1` starts both tasks through `cmd.exe` and appends everything they print, errors included, to
+`task.log`, with a `====` timestamp line per run. That also catches errors from before the script's own logging
+starts, such as a parameter that won't bind. A task registered with an older `Register-Task.ps1` has no log: register
+it again. Without a log, capture the output once with a throwaway SYSTEM task:
+
+```powershell
+$root = 'C:\Lab\identity-analytics'; $log = "$root\data\activity\task_debug.log"
+$cmd  = '/c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}\collector\Generate-Activity.ps1" -Action Daily > "{1}" 2>&1' -f $root, $log
+Register-ScheduledTask -TaskName IA-Debug -Force `
+  -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument $cmd -WorkingDirectory "$root\collector") `
+  -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest) | Out-Null
+Start-ScheduledTask IA-Debug; Start-Sleep 30; Get-Content $log
+Unregister-ScheduledTask IA-Debug -Confirm:$false; Remove-Item $log
+```
+
+This also runs `Daily` once more. That's harmless, because the extra activity is logged like any other.
+
 ### Run statuses
 
 | `runs.status` | Meaning | What to do |
@@ -346,6 +589,7 @@ Get-Content C:\ProgramData\IdentityAnalytics\collect.log -Tail 20
 | Symptom | Cause | Fix |
 |---|---|---|
 | `PSSQLite not found` in `collect.log`, but it works when you run it by hand | PSSQLite installed for CurrentUser; SYSTEM can't see your profile | `Install-Module PSSQLite -Scope AllUsers`. `Register-Task.ps1` warns about this |
+| Task returns 1 with `Join-Path : Cannot bind argument to parameter 'Path' because it is an empty string`, but the script works by hand | An older copy of a script with a `$PSScriptRoot` path default in `param()`, which is empty under `powershell.exe -File` | Copy the current scripts into the VM (path defaults are now set in the script body) |
 | `Access is denied` reading the Security log | Not running elevated | Run as Administrator, or let the SYSTEM task run it |
 | Database won't open; errors about a missing function or bad syntax in a view | A view uses SQL newer than SQLite 3.8.8 (window functions, `IIF`, UPSERT). SQLite parses every view when a connection opens | Rewrite the view in 3.8.8 SQL. `ViewsLocal.Tests.ps1` runs through PSSQLite and catches this |
 | Expected events missing (e.g. no 4740 lockouts) | Audit subcategory not enabled, or lockout policy not set | Rerun `Setup-AuditPolicy.ps1 -SetLockoutPolicy` and compare with `data/audit-evidence/` |

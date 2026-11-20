@@ -20,11 +20,13 @@
 param(
     [switch]$SetLockoutPolicy,
     [int]$LogSizeBytes = 1073741824,
-    [string]$EvidenceDir = (Join-Path $PSScriptRoot '..\data\audit-evidence'),
+    [string]$EvidenceDir,   # default: ..\data\audit-evidence
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+# Not a param() default: $PSScriptRoot is empty there under powershell.exe -File (Windows PowerShell).
+if (-not $EvidenceDir) { $EvidenceDir = Join-Path $PSScriptRoot '..\data\audit-evidence' }
 
 $model = (Get-CimInstance Win32_ComputerSystem).Model
 if ($model -notmatch 'Virtual|VMware|VirtualBox|KVM|QEMU|HVM' -and -not $Force) {

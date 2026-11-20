@@ -19,11 +19,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Database = (Join-Path $PSScriptRoot 'sample.db'),
+    [string]$Database,   # default: sample.db next to this script
     [int]$Seed = 42
 )
 
 $ErrorActionPreference = 'Stop'
+# Not a param() default: $PSScriptRoot is empty there under powershell.exe -File (Windows PowerShell).
+if (-not $Database) { $Database = Join-Path $PSScriptRoot 'sample.db' }
 Import-Module PSSQLite
 Import-Module (Join-Path $PSScriptRoot '..\collector\IdentityCollector.psm1') -Force
 

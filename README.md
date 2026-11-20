@@ -4,29 +4,38 @@
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![Power BI](https://img.shields.io/badge/Power%20BI-F2C811?logo=powerbi&logoColor=black)
 [![Hyper-V](https://img.shields.io/badge/Hyper--V-Windows%2011-0078D4)](#building-the-lab-vm)
-![Tests](https://img.shields.io/badge/Pester%20tests-51%20passing-brightgreen)
+[![CI](https://github.com/joeywangtx/win_identity_analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/joeywangtx/win_identity_analytics/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-An end-to-end identity risk analytics pipeline. It collects account, group and authentication data from a Windows 11
-lab VM, built from scratch on Hyper-V with PowerShell ([details](#building-the-lab-vm)). It computes identity
-**key risk indicators (KRIs)** in SQL and reports them in Power BI. Finally, it applies behavioural indicators to
-real enterprise authentication logs from Los Alamos National Laboratory ([LANL](#references)) and
-measures how well they detect a labelled red team, using precision, recall and F1.
+I built a small, realistic Windows environment and a tool that checks it every day for account security risks, the
+kind that lead to break-ins: unused admin accounts, weak password settings, repeated failed sign-ins. The results feed
+a Power BI dashboard with a red / amber / green status for each risk. I also tested how well simple warning signs spot
+real attackers in 6.2 million sign-ins from a US national laboratory: the best one finds them about **135 times
+better than chance**. On my own test machine, the tool found real problems, including an admin account that could
+have had an empty password.
 
-> **Docs:** this page covers purpose, method and results. For installation, configuration, testing and
-> troubleshooting, see [ENGINEERING.md](ENGINEERING.md).
+**Skills:** Identity & Access Management (IAM) · Windows security and audit logging · PowerShell automation · SQL and
+data analysis · Power BI dashboards · Hyper-V virtualization · automated testing and CI (GitHub Actions)
+
+<!-- DASHBOARD IMAGE: export the Overview page from Power BI and uncomment the line below.
+![Power BI overview: KRI cards with red/amber/green status, collector health and failed-logon trend](powerbi/screenshots/01-overview.png)
+-->
+
+> **Docs:** this page covers what the project does and what it found. For installation, configuration, internals,
+> testing and troubleshooting, see [ENGINEERING.md](ENGINEERING.md). The VM build is in [VM_SETUP.md](VM_SETUP.md),
+> and the full evidence is in [report/findings.md](report/findings.md).
 
 ## Contents
 
 1. [Key results](#key-results)
 2. [Purpose](#purpose)
-3. [Architecture](#architecture)
+3. [How it works](#how-it-works)
 4. [Building the lab VM](#building-the-lab-vm)
 5. [Quick start](#quick-start)
 6. [Methodology](#methodology)
 7. [The data](#the-data)
-8. [Analytics](#analytics)
-9. [Results](#results)
+8. [Results](#results)
+9. [Problems I solved](#problems-i-solved)
 10. [Recommendations](#recommendations)
 11. [Limitations](#limitations)
 12. [Repository layout](#repository-layout)
@@ -39,17 +48,14 @@ measures how well they detect a labelled red team, using precision, recall and F
 
 | | Result |
 |---|---|
-| **Pipeline** | Collector → SQLite → SQL KRIs → Power BI, working end to end. On the synthetic sample, every red/amber KRI traces back to exactly one staged account, and 51 Pester tests check this. |
-| **Hygiene KRIs** | Can be computed reliably from Windows logs, as long as audit logging is verified first and collector gaps are tracked as a KRI. |
-| **Best detector (LANL)** | `fan_out` catches **19 of 45** red-team users in a list of 50, about **135× better than chance** (F1 0.40). |
-| **Highest precision (LANL)** | `combined_lateral`: 0.60 precision in a 20-user list. `combined_risk` is 5 for 5 at N = 5. |
-| **Weak signals** | Failure-, NTLM- and logon-type indicators are close to noise. Blending them in makes the combined score worse. |
-| **Main gap** | No indicator catches most attackers in a short list. Many red-team users log on only once or twice on the detection day. |
-| **Lab environment** | A Windows 11 VM built and configured entirely with PowerShell on Hyper-V (Generation 2, virtual TPM, Secure Boot), running the collector daily as a SYSTEM scheduled task. |
-| **Lab VM results** | Collection in progress, ending around 7 November 2026. Results will be added afterwards. |
+| **It ran reliably** | The tool checked the test machine daily for 24 days with no failed check and no lost records. Twice the machine was off at check time, once for a security-update reboot, and the next check caught up. |
+| **It found real problems** | I planted test accounts with known problems, and the tool caught every one that Windows let me set up. It also found three problems I hadn't planted: the machine's own admin account could have had an empty password, a disabled account kept being signed into, and an admin's rights were removed by an automated job, so no person is on record for the change. |
+| **Best warning sign** | Users who suddenly sign in to many computers. In a review list of 50 people out of 16,000, it finds 19 of the 45 attackers, about 135 times better than picking at random. |
+| **Most precise warning sign** | Combining "many computers" with "computers never used before": 12 of the top 20 people it flags are real attackers. |
+| **What didn't work** | Failed passwords and older sign-in methods hardly separate attackers from normal users, and mixing them into a combined score made it worse. Many attackers sign in only once or twice a day, so no warning sign catches most of them in a short list. |
+| **Built to be trusted** | 51 automated tests check every step against answers known in advance, and run on every change. |
 
-**N** is the number of top-scoring users flagged per indicator, which works like an analyst's daily review budget.
-**Best N** is the N with the highest F1 for that indicator.
+The technical details behind each row are in [Results](#results).
 
 ## Purpose
 
@@ -66,7 +72,7 @@ The project builds that pipeline end to end, from raw logs to a dashboard, to an
 2. **Do simple behavioural indicators find real attackers in enterprise data, and at what cost in false alarms?**
    Instead of claiming an indicator "detects lateral movement", each one is scored against labelled red-team activity.
 
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
@@ -89,31 +95,28 @@ flowchart LR
 | Enterprise import | PowerShell streaming gzip, `sqlite3 .import` | [lanl/Import-LanlSlice.ps1](lanl/Import-LanlSlice.ps1) |
 | Storage and analytics | SQLite, SQL views | [sql/](sql/) |
 | Reporting | Power BI (ODBC) | [powerbi/](powerbi/), [report/findings.md](report/findings.md) |
-| Testing | Pester 5 | [tests/](tests/) |
+| Testing | Pester 5, GitHub Actions | [tests/](tests/), [.github/workflows/](.github/workflows/) |
 
-Design highlights: incremental, idempotent loading keyed on log epoch + `EventRecordID` (safe across log clears); detection of gaps from log rollover and
-log clearing; orphaned-SID handling; locale-safe matching by SID and GUID; and reproducible time references. See
+How the collector avoids double counting, survives log clears and stays locale-independent is covered in
 [ENGINEERING.md → Design notes](ENGINEERING.md#design-notes).
 
 ## Building the lab VM
 
 Part 1 runs inside a Windows 11 virtual machine, `IDLAB-VM`. I built it from scratch on Hyper-V with PowerShell, and
-it has been collecting daily since 24 October 2026. The full step-by-step guide is in [VM_SETUP.md](VM_SETUP.md).
+it collected daily from 24 October to 17 November 2026. The full step-by-step guide, including the script that creates
+the VM, is in [VM_SETUP.md](VM_SETUP.md).
 
 ### Why a VM
 
 The collector needs a Windows machine where it is safe, and meaningful, to do things you would never do on a real
 workstation:
 
-- **It changes security settings.** Setup rewrites the audit policy, resizes the Security log and sets an account
-  lockout policy.
-- **It creates, breaks and deletes accounts.** The scenario adds a user to Administrators, triggers lockouts and
-  deletes an account that is still in a group.
+- **It changes security settings and breaks accounts.** Setup rewrites the audit policy and sets an account lockout
+  policy. The scenario adds a user to Administrators, triggers lockouts, and disables and deletes accounts.
 - **It needs a known starting point.** A fresh VM has a short account list and an empty Security log, so nearly every
   event is either staged (and logged) or attributable to Windows. That makes the local checks testable against
   ground truth.
-- **It must run for weeks.** Dormancy, password age and "remove the temporary admin a week later" only appear over
-  time.
+- **It must run for weeks.** Dormancy and "remove the temporary admin a week later" only appear over time.
 - **It can be rolled back.** Checkpoints make any mistake a one-command undo.
 
 ### VM specification
@@ -121,7 +124,7 @@ workstation:
 | Setting | Value | Why |
 |---|---|---|
 | Hypervisor | Hyper-V (built into Windows 11 Pro) | No extra software; fully scriptable from PowerShell |
-| OS | Windows 11 Enterprise evaluation | Free for 90 days, no product key, and easy to set up with a local account |
+| OS | Windows 11 Enterprise evaluation | Free for 90 days, no product key needed |
 | Generation | 2 | Required for Secure Boot and TPM |
 | CPU / memory | 2 vCPUs, 4 GB fixed | Windows 11 minimums. Leaves the 16 GB host about 12 GB |
 | Disk | 64 GB dynamic VHDX | Starts at about 25 GB and grows as needed |
@@ -133,25 +136,12 @@ workstation:
 ```mermaid
 flowchart LR
     A["Enable Hyper-V"] --> B["Create VM<br/>(PowerShell script)"]
-    B --> C["Install Windows 11<br/>local account"]
+    B --> C["Install Windows 11<br/>+ local admin labadmin"]
     C --> D["Prepare: updates,<br/>PSSQLite, no sleep"]
     D --> E["Checkpoint<br/>clean-install"]
     E --> F["Copy code in via<br/>PowerShell Direct"]
-    F --> G["Audit policy +<br/>daily SYSTEM task"]
+    F --> G["Audit policy +<br/>daily SYSTEM tasks"]
     G --> H["Checkpoint<br/>collector-ready"]
-```
-
-The VM itself is created by a short script rather than clicked together in Hyper-V Manager, so it can be rebuilt with
-exactly the same settings:
-
-```powershell
-New-VM -Name IDLAB-VM -Generation 2 -MemoryStartupBytes 4GB -Path C:\HyperV `
-       -NewVHDPath C:\HyperV\IDLAB-VM\IDLAB-VM.vhdx -NewVHDSizeBytes 64GB -SwitchName 'Default Switch'
-Set-VMProcessor -VMName IDLAB-VM -Count 2
-Set-VMKeyProtector -VMName IDLAB-VM -NewLocalKeyProtector
-Enable-VMTPM -VMName IDLAB-VM                                   # Windows 11 needs a TPM
-Set-VMFirmware -VMName IDLAB-VM -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
-Enable-VMIntegrationService -VMName IDLAB-VM -Name 'Guest Service Interface'   # for PowerShell Direct
 ```
 
 Code goes in, and the database comes out, through **PowerShell Direct** (`New-PSSession -VMName`), which talks to the
@@ -161,15 +151,12 @@ VM over the Hyper-V bus without any network shares.
 
 - **Windows 11 has hard hardware requirements, even in a VM.** Without a Generation 2 VM, Secure Boot with the
   Microsoft template, a virtual TPM and fixed memory, setup refuses to install.
-- **Scheduled tasks running as SYSTEM don't see your user profile.** PowerShell modules installed for the current
-  user are invisible to SYSTEM, so PSSQLite must be installed for all users. The collector writes to
-  `%ProgramData%` for the same reason.
-- **A VM only collects while it's running.** A paused or stopped VM logs nothing. The task is set to run late on the
-  next start, and the run history makes any gap visible instead of silent.
-- **Take checkpoints at known-good points.** `clean-install` and `collector-ready` made it safe to experiment.
-  Restoring a checkpoint discards collected data, so the database is copied out first.
-- **Do Windows Update before collecting.** Updates add a lot of noise to the Security log, so they're done before
-  the collector starts.
+- **Scheduled tasks running as SYSTEM don't see your user profile.** Modules installed for the current user are
+  invisible to SYSTEM, and so are passwords encrypted for your user. Both have to be stored machine-wide.
+- **A VM only collects while it's running.** A paused or stopped VM logs nothing, and after a host reboot it stays off
+  unless set to start automatically. The run history makes every gap visible instead of silent.
+- **Take checkpoints at known-good points**, and copy the database out first: restoring one discards collected data.
+- **Do Windows Update before collecting.** Updates add a lot of noise to the Security log.
 
 A standalone VM has no Active Directory and therefore no domain-wide Kerberos events. Part 2 uses LANL for enterprise
 scale.
@@ -193,18 +180,10 @@ sqlite3 -header -column sample\sample.db "SELECT * FROM v_privileged_accounts;"
 sqlite3 -header -column sample\sample.db "SELECT indicator, top_n, precision, recall, f1 FROM lanl_detection_eval ORDER BY f1 DESC LIMIT 10;"
 ```
 
-Run the tests (requires [Pester](https://pester.dev) 5.5+ and PSSQLite):
-
-```powershell
-Invoke-Pester .\tests
-```
-
-For the lab VM collector, the LANL import or the Power BI dashboard, see
-[ENGINEERING.md → Running](ENGINEERING.md#running).
+Run the tests (requires [Pester](https://pester.dev) 5.5+ and PSSQLite) with `Invoke-Pester .\tests`. For the lab VM
+collector, the LANL import or the Power BI dashboard, see [ENGINEERING.md → Running](ENGINEERING.md#running).
 
 ## Methodology
-
-The work has three parts. Each part produces something the next one uses.
 
 | Part | Question | Data | Method | Output |
 |---|---|---|---|---|
@@ -219,110 +198,17 @@ Steps:
 2. **Collect daily, without gaps or duplicates.** Each run records every account and group membership, then loads
    only the security events logged since the previous run. Gaps, such as log rollover, are detected and flagged.
 3. **Stage known activity.** About 10 test accounts play out a scripted scenario: regular logons, dormant accounts, a
-   temporary admin, lockouts, and a deleted account left behind in a group. Every staged action is logged as
-   ground truth.
+   temporary admin, lockouts, a disabled account, and the deletion of an account in a privileged group. Every staged
+   action is logged as ground truth.
 4. **Slice the enterprise data.** Choose a quiet baseline day and a busy red-team day from LANL, keep only user logon
    events, and record how many rows each filter removed.
 5. **Learn "normal" from the baseline, then score the detection day.** Indicators such as *new user→computer pairs*
    are measured against each user's baseline history.
 6. **Measure detection.** For each indicator, rank every user on the detection day, flag the top N
    (N = 5, 10, 20, 50, 100, 250), and compare the flagged users with the red-team labels.
-7. **Summarise as KRIs.** Reduce each check to one row with a value, a threshold and a status. The dashboard and the
-   findings report are built on those rows.
+7. **Summarise as KRIs.** Reduce each check to one row with a value, a threshold and a status
+   ([thresholds](ENGINEERING.md#kri-thresholds)). The dashboard and the findings report are built on those rows.
 8. **Test every step.** 51 Pester tests check each step against inputs whose correct answer is already known.
-
-## The data
-
-| Data set | Contents | Published | Used for |
-|---|---|---|---|
-| **Sample** (`sample/sample.db`) | Synthetic local data plus a synthetic LANL-format slice | Yes | Trying everything without a lab or the LANL download |
-| **Lab VM** | Real collector output from a Windows 11 virtual machine | No | Part 1 findings |
-| **LANL slice** | Real enterprise authentication events, days 7–8 | No: download it from LANL ([1](#references)) | Part 2 detection results |
-
-### Sample database
-
-Fully synthetic and deterministic. The LANL half is written in the real LANL file format and loaded through the real
-importer, so the sample exercises the production code path.
-
-**Local half:** 21 daily runs (2–22 October 2026) for host `IDLAB-VM`, with 14 accounts, 515 authentication events
-and 9 account changes:
-
-| Account | Scenario | Expected finding |
-|---|---|---|
-| `labadmin` | Lab owner, daily admin logons | None (the normal case) |
-| `jsmith`, `mjones`, `akim` | Regular users, weekday logons, occasional typos | Background failed-logon noise. `mjones` is disabled on day 13 |
-| `helpdesk_tom` | Added to Administrators on day 4, removed on day 11 | Two privileged group changes by `labadmin` |
-| `svc_backup` | Service logons around the clock, password never expires, password set 2025-11 | Password never expires |
-| `svc_report` | Service account with no description | Data-quality issue |
-| `temp_contractor` | Password not required; locked out twice (days 6 and 17) | Password not required (red), 2 lockouts |
-| `old_pwd_carl` | Password last set 2025-03 | Password older than 365 days |
-| `dormant_alice` | In Administrators, never logs on | **Dormant privileged account** (red) |
-| `dormant_bob` | Never logs on; deleted on day 14 while still in Backup Operators | Orphaned SID in a privileged group |
-| *(nonexistent `admin`)* | Password-spray noise from 192.168.56.50 every third day | Failures for an unknown user |
-
-Run 9 is recorded as **failed** (the VM was suspended), so the collector-health KRI has a real case to catch.
-
-**LANL half:** 300 users across two days, 33,665 lines read and 18,349 kept. A red team of **6 users** moves laterally
-to 8–20 never-seen computers each. Decoy groups make detection non-trivial:
-
-| Decoy group | Behaviour | Indicator it fools |
-|---|---|---|
-| 8 admins | High fan-out every day, including the baseline | `fan_out` (not `new_pairs`, because the pairs aren't new) |
-| 12 "movers" | Start using a few new servers on the detection day | `new_pairs` at larger N |
-| 7 stale-password users | Bursts of failed NTLM logons | `failures`, `failure_burst` |
-| 5 service accounts | Active all day; one logs on interactively | `service_interactive` |
-| ~10% of users | Still on NTLM | `ntlm_logons` |
-
-### Lab VM data
-
-A Windows 11 VM runs the collector daily as SYSTEM. Each run records account snapshots, group membership (including
-unresolvable members), authentication events, account-lifecycle and group-change events, Security-log clears, and run
-history. The data mixes staged activity (all listed in a log of staged actions) with organic Windows activity. The
-findings report separates the two.
-
-**Status:** collecting since 24 October 2026, with one successful run per day and about 630 events per day.
-
-### LANL enterprise authentication data
-
-The **Comprehensive, Multi-Source Cyber-Security Events** dataset ([1](#references)) covers 58 days of LANL's
-corporate network, with user and computer names anonymised. It pairs real enterprise-scale identity logs with
-ground-truth red-team labels, and it is released under CC0. This project uses `auth.txt.gz` (7.2 GB) and
-`redteam.txt.gz` (4.8 KB). The process, flow and DNS files are not used.
-
-In plain terms, `auth.txt.gz` is a record of every logon on a real network of about 16,000 daily users: who logged
-on, from which computer, to which computer, how, and whether it worked. `redteam.txt.gz` lists the logons made by
-LANL's own security team while it played the attacker, which gives an answer key to grade the indicators against.
-
-**Slice:** baseline = **day 7** (1 red-team event, nearly clean), detection = **day 8** (the busiest red-team day,
-273 events by 45 users).
-
-**Why these two days?**
-
-- **Day 8 is the detection day** because it has the most red-team activity in the whole dataset: 45 attacker
-  accounts. Day 12 comes next with 39, and most days with any red-team activity have only 1 to 4. More attackers to find makes precision and recall meaningful
-  instead of hinging on a handful of users.
-- **Day 7 is the baseline** because it's the day right before and almost free of attackers (a single red-team
-  event). Indicators like *new user→computer pairs* learn "normal" from the baseline, so it needs to be clean, and
-  close enough in time that normal behaviour hasn't changed.
-- **They're early in the file.** The log is sorted by time, so the importer can stop after day 8, reading about
-  150 million lines instead of more than a billion.
-
-The per-day red-team counts behind this choice, and an alternative pair (baseline 11, detection 12–13), are in
-[lanl/README.md](lanl/README.md#choosing-the-slice).
-
-| Step | Rows |
-|---|---|
-| Lines read (stopped at the end of day 8) | 152,468,275 |
-| Before the window (days 0–6, skipped) | 113,699,303 |
-| In the window (days 7–8) | 38,768,971 |
-| Removed: not a logon (logoffs, Kerberos ticket requests) | 22,494,657 |
-| Removed: computer accounts | 10,053,920 |
-| **Kept for analysis** | **6,220,394** (3.12M baseline, 3.10M detection) |
-
-About 16,000 users are active per day, of whom 45 are labelled red team: a base rate of **0.28%**. Download steps are in
-[lanl/README.md](lanl/README.md).
-
-## Analytics
 
 ### Local checks
 
@@ -330,13 +216,11 @@ About 16,000 users are active per day, of whom 45 are labelled red team: a base 
 |---|---|---|
 | Dormant accounts | Enabled accounts with no logon in more than 30 days, or never | Unused accounts are unmonitored credentials |
 | Privileged accounts | Members of admin-level groups, with dormant and orphaned members flagged | Admin rights should be few and in active use |
-| Password hygiene | Never-expires, not-required, and password age (0–90 / 90–365 / 365+ days) | Old or optional passwords are easy targets |
-| Daily auth failures | Failed logons by day, account, logon type and reason | Separates typos, unknown-user spraying and locked accounts |
-| Lockouts | Each lockout, with the failures before it and how fast they came | Brute force vs. a stale saved password |
+| Password hygiene | Never-expires, not-required, and password age | Old or optional passwords are easy targets |
+| Auth failures and lockouts | Failed logons by reason, and how fast each lockout came | Separates typos, spraying and brute force |
 | Privileged group changes | Additions to and removals from admin groups, with who made them | Every change should match a ticket |
-| Account lifecycle | Created / enabled / disabled / deleted / changed / locked / unlocked | Joiner-mover-leaver audit trail |
-| Data quality | Orphaned SIDs, accounts without descriptions, events for deleted accounts | Gaps in the data are findings too |
-| Collector health | Each run's status and volume | A KRI is only as good as the run behind it |
+| Account lifecycle | Created / enabled / disabled / deleted / locked | Joiner-mover-leaver audit trail |
+| Data quality and collector health | Orphaned SIDs, deleted accounts, missing descriptions, failed runs | A KRI is only as good as the data behind it |
 
 ### LANL indicators
 
@@ -354,8 +238,6 @@ Each indicator is computed per user over the detection day.
 | `combined_risk` | Average rank across failures, fan-out, new pairs, NTLM and rare types | Is a blended score better than any single signal? |
 | `combined_lateral` | Average rank across fan-out and new pairs | The two lateral-movement signals together |
 
-`ANONYMOUS LOGON` is a protocol artefact, not a person, so it is excluded from user scoring and reported per computer.
-
 **Scoring.** For each indicator and each N, flag the N highest-scoring users, then compute:
 
 - **Precision** = flagged red-team users ÷ flagged users. Of the alerts, how many were real?
@@ -364,46 +246,95 @@ Each indicator is computed per user over the detection day.
 
 A small N gives a short, high-precision alert queue. A large N catches more attackers but adds more false alarms.
 
-### KRI thresholds
+## The data
 
-| KRI | Status rule |
-|---|---|
-| Dormant privileged accounts, password not required, Security log cleared (30 days) | > 0 → red |
-| Password never expires, passwords older than 365 days, orphaned SIDs, failed collector runs (14 days), privileged group changes (7 days) | > 0 → amber |
-| Lockouts in last 7 days | > 3 → amber |
-| LANL users with 5+ new computer pairs | > 10 → amber |
-| LANL NTLM share of logons | > 5% → amber |
-| Failed logons (7 days), LANL best F1 | Context only (`info`) |
+| Data set | Contents | Published | Used for |
+|---|---|---|---|
+| **Sample** (`sample/sample.db`) | Synthetic local data plus a synthetic LANL-format slice | Yes | Trying everything without a lab or the LANL download, and the tests |
+| **Lab VM** | Real collector output from the Windows 11 VM, 24 Oct – 17 Nov 2026 | No | Part 1 findings |
+| **LANL slice** | Real enterprise authentication events, days 7–8 | No: download it from LANL ([1](#references)) | Part 2 detection results |
 
-Thresholds are defined in [sql/kri_summary.sql](sql/kri_summary.sql).
+**Sample database.** Fully synthetic and deterministic: 21 daily runs for 14 accounts, each with one planted issue,
+plus 300 LANL-format users with a 6-user red team and decoys built to fool each indicator. Its LANL half goes through
+the real importer, so the sample exercises the production code path. The account-by-account scenario is in
+[ENGINEERING.md → Sample database contents](ENGINEERING.md#sample-database-contents).
+
+**Lab VM.** 24 collector runs: 10,548 authentication events and 134 account and group changes. The data mixes staged
+activity (every action logged to `staged_activity.csv`) with organic activity from Windows and my own use, and the
+findings report separates the two. The staged scenario ran from 6 to 15 November; the day-by-day run log, including
+what went wrong, is in [ENGINEERING.md → Lab VM run log](ENGINEERING.md#lab-vm-run-log).
+
+**LANL.** The **Comprehensive, Multi-Source Cyber-Security Events** dataset ([1](#references)) covers 58 days of
+LANL's corporate network, with names anonymised and released under CC0. In plain terms, `auth.txt.gz` (7.2 GB) is a
+record of every logon on a network of about 16,000 daily users: who logged on, from which computer, to which
+computer, how, and whether it worked. `redteam.txt.gz` lists the logons made by LANL's own security team while it
+played the attacker, which gives an answer key to grade the indicators against.
+
+**Why days 7 and 8?**
+
+- **Day 8 is the detection day** because it has the most red-team activity in the whole dataset: 45 attacker
+  accounts. Day 12 comes next with 39, and most days with any red-team activity have only 1 to 4. More attackers to
+  find makes precision and recall meaningful instead of hinging on a handful of users.
+- **Day 7 is the baseline** because it's the day right before and almost free of attackers (a single red-team
+  event). Indicators like *new user→computer pairs* learn "normal" from the baseline, so it needs to be clean, and
+  close enough in time that normal behaviour hasn't changed.
+- **They're early in the file.** The log is sorted by time, so the importer can stop after day 8, reading about
+  150 million lines instead of more than a billion.
+
+After keeping only user logons, **6.2 million events** remain (3.1M per day). About 16,000 users are active per day,
+of whom 45 are labelled red team: a base rate of **0.28%**. The row counts per filter are in
+[ENGINEERING.md → LANL slice](ENGINEERING.md#lanl-slice), and the download and slice choice in
+[lanl/README.md](lanl/README.md).
 
 ## Results
 
-### Sample database
+### Lab VM
+
+KRIs as of the last run (17 November 2026). Full evidence for each row is in
+[report/findings.md](report/findings.md).
 
 | KRI | Value | Status | Cause |
 |---|---|---|---|
-| Dormant privileged accounts | 1 | 🔴 red | `dormant_alice` in Administrators, never logged on |
-| Password not required | 1 | 🔴 red | `temp_contractor` |
-| Password never expires | 1 | 🟠 amber | `svc_backup` |
-| Passwords older than 365 days | 1 | 🟠 amber | `old_pwd_carl` (set 2025-03) |
-| Orphaned SIDs in groups | 1 | 🟠 amber | Deleted `dormant_bob` still in Backup Operators |
-| Failed collector runs (14 days) | 1 | 🟠 amber | Run 9 (VM suspended) |
-| Lockouts in last 7 days | 1 | 🟢 green | `temp_contractor` on 18 Oct (below the threshold of 3) |
-| Privileged group changes (7 days) | 0 | 🟢 green | `helpdesk_tom`'s changes on days 4 and 11 fall outside the window |
+| Dormant privileged accounts | 1 | 🔴 red | `dormant_alice` in Administrators, never signed in (staged) |
+| Password not required | 2 | 🔴 red | `temp_contractor` (staged) and **`labadmin`**, the lab's own admin account (organic) |
+| Password never expires | 3 | 🟠 amber | `svc_backup` (staged); `labadmin` and the owner's Microsoft account (organic) |
+| Privileged group changes (7 days) | 2 | 🟠 amber | `dormant_bob` removed from Backup Operators when deleted; `helpdesk_tom` removed from Administrators |
+| Lockouts in last 7 days | 1 | 🟢 green | `temp_contractor` on 15 Nov. The 8 Nov lockout is outside the window |
+| Passwords older than 365 days | 0 | 🟢 green | Can't be staged: Windows doesn't allow a backdated password |
+| Orphaned SIDs in groups | 0 | 🟢 green | Deleting a local account removes it from its groups |
 | Security log cleared (30 days) | 0 | 🟢 green | None |
-| Failed logons in last 7 days | 23 | info | Typos, spraying and the lockout |
-| LANL users with 5+ new pairs | 12 | 🟠 amber | 6 red team + 6 movers |
-| LANL NTLM share | 10.37% | 🟠 amber | ~10% of synthetic users on NTLM |
-| LANL best indicator F1 | 0.909 | info | `new_pairs` / `combined_risk` at N = 5 |
+| Failed collector runs (14 days) | 0 | 🟢 green | 24 of 24 runs succeeded |
+| Failed logons in last 7 days | 22 | info | Typos, lockout attempts and the disabled account; 33 of 36 all-time failures are staged |
 
-Every red and amber row traces back to exactly one staged account, and the automated tests check this. On the
-sample, `new_pairs` and `combined_risk` reach precision 1.0 and recall 0.83 at N = 5, and recall 1.0 at N = 10. This
-is expected, because the synthetic red team is built to be findable. It validates the pipeline, not the indicators.
+<!-- DASHBOARD IMAGE: export the "Privileged access & hygiene" page and uncomment the line below.
+![Power BI: admin-group members with dormant flag, privileged group changes over time, password flags](powerbi/screenshots/03-privileged-access.png)
+-->
+
+What the VM showed that the sample couldn't:
+
+- **The scenario found real problems.** `labadmin` was created with `New-LocalUser`, which silently sets "password not
+  required". It now sits in Administrators with a password that may be blank.
+- **A disabled account kept being tried.** `mjones` got 8 failed sign-ins with reason "account disabled" after it
+  was disabled. On a real network, that means something still holds a leaver's password.
+- **The temporary admin was removed by the machine.** The removal is attributed to `IDLAB-VM$` (a scheduled task
+  running as SYSTEM), not a person. `helpdesk_tom`'s sign-ins confirm both changes independently: Windows gives an
+  admin two sessions per sign-in, and the count doubles on 8 Nov and halves again on 15 Nov.
+- **No orphaned SID on a standalone machine.** Deleting `dormant_bob` removed it from its groups in the same second.
+  Orphans need a domain or cloud account deleted elsewhere, so only the sample database shows that KRI.
+- **7-day KRIs show part of a longer story.** The scenario took 8 days. On 17 November the KRIs show the admin
+  removal but not the grant, and one of the two lockouts. The event views hold the full history.
+- **Staged activity is a sliver of the log.** 97% of successful sign-ins are Windows service sign-ins, and only 1.4%
+  are staged.
+
+<!-- DASHBOARD IMAGE: export the "Authentication" page and uncomment the line below.
+![Power BI: failed logons by day and reason, with the two lockouts marked](powerbi/screenshots/02-authentication.png)
+-->
 
 ### LANL enterprise data
 
-Baseline day 7, detection day 8, 45 red-team users among ~16,000 active users. Best N per indicator, by F1:
+Baseline day 7, detection day 8, 45 red-team users among ~16,000 active users. **N** is the number of top-scoring
+users flagged per indicator, which works like an analyst's daily review budget; **best N** is the N with the highest
+F1 for that indicator:
 
 | Indicator | Best N | Red team caught | Precision | Recall | F1 |
 |---|---|---|---|---|---|
@@ -416,6 +347,10 @@ Baseline day 7, detection day 8, 45 red-team users among ~16,000 active users. B
 | `failures` | 250 | 13 | 0.05 | 0.29 | 0.09 |
 | `rare_logon_types` | 250 | 9 | 0.04 | 0.20 | 0.06 |
 | `ntlm_logons` | 10 | 1 | 0.10 | 0.02 | 0.04 |
+
+<!-- DASHBOARD IMAGE: export the "Detection results" page and uncomment the line below.
+![Power BI: precision and recall against N for each indicator, showing the alert-volume trade-off](powerbi/screenshots/05-detection.png)
+-->
 
 Interpretation:
 
@@ -433,23 +368,46 @@ Interpretation:
 
 Resulting KRIs: 632 users with 5+ new computer pairs (amber), NTLM share 22.36% (amber), best F1 0.40.
 
-### Lab VM
+### Sample database
 
-Results will be published in this section and in [report/findings.md](report/findings.md) after collection ends.
-If the staged scenario runs as planned, the VM's KRIs should follow the sample pattern, with organic Windows activity
-(service logons, updates, unscripted failures) on top.
+Every red and amber KRI on the sample traces back to exactly one planted account, and the automated tests check
+this. Its synthetic red team is built to be findable (precision 1.0 at N = 5), so it validates the pipeline, not
+the indicators. The full table is in [ENGINEERING.md → Sample database contents](ENGINEERING.md#sample-database-contents).
+
+## Problems I solved
+
+Each of these broke something real, and each fix is covered by a test or documented in
+[ENGINEERING.md](ENGINEERING.md):
+
+- **A cleared Security log made the collector go blind.** Event record IDs restart after a log clear, so new events
+  looked like duplicates and were skipped. The collector now detects the reset and starts a new "log epoch".
+  ([Design notes](ENGINEERING.md#design-notes))
+- **A scheduled task that failed silently for two days.** The script worked by hand but exited with code 1 as a
+  task, because Windows PowerShell leaves `$PSScriptRoot` empty in parameter defaults under `-File`. I reproduced it,
+  fixed four scripts, and made both tasks log their output so the next failure is visible.
+  ([Troubleshooting](ENGINEERING.md#is-the-staged-activity-running))
+- **Passwords that only one user could read.** Test-account passwords were encrypted for my user, so the SYSTEM task
+  couldn't decrypt them. They are now encrypted for the machine and locked down with a file ACL.
+- **An old SQLite inside the PowerShell module.** PSSQLite bundles SQLite 3.8.8 from 2015, and one modern view would
+  break the collector. Persistent views use 3.8.8 SQL; the LANL analysis runs in the modern CLI.
+  ([Design notes](ENGINEERING.md#design-notes))
+- **A scenario step that can't work.** I expected deleting `dormant_bob` to leave an orphaned SID. The data showed
+  Windows cleans up local group memberships, so I documented the limitation instead of faking the result.
 
 ## Recommendations
 
-These follow from the results above. Local-hygiene items are based on the sample scenario and will be validated
-against the VM results.
+These follow from the results above: the local items from the sample and the lab VM, the analytics items from LANL.
 
 ### Security
 
 - **Remove dormant privileged access.** Disable dormant admin accounts or remove them from privileged groups, and
   review admin-group membership regularly.
-- **Clean group memberships before deleting accounts.** An orphaned SID in Backup Operators means deprovisioning
-  deleted the account but left its privilege behind. Make "remove from all groups" a required offboarding step.
+- **Check new accounts for silent defaults.** `New-LocalUser` sets "password not required" on every account it
+  creates, and the lab's own admin account had it. Run a flag check as the last step of every provisioning script.
+- **Hunt down stale credentials for disabled accounts.** A sign-in failing with "account disabled" means a
+  leaver's password is still stored somewhere. Find the source and remove it before the account is ever re-enabled.
+- **Clean group memberships before deleting domain accounts.** Windows cleans up local accounts (the lab VM confirmed
+  it), but not domain or cloud accounts in local groups. Make "remove from all groups" a required offboarding step.
 - **Fix password exceptions.** Clear the password-not-required flag, rotate passwords older than 365 days, and move
   service accounts with never-expiring passwords to managed service accounts with automatic rotation.
 - **Make admin rights temporary by default.** Grant temporary admin rights through just-in-time access with an
@@ -472,11 +430,14 @@ against the VM results.
 
 ### Monitoring
 
+- **Alert on each privileged group change.** A 7-day count missed both of `helpdesk_tom`'s changes in the sample,
+  and on the VM it showed the removal without the grant. Match each change to a ticket when it happens, and run
+  automated changes under a named identity, not SYSTEM, so the log shows who is accountable.
+- **Alert on sign-ins to disabled accounts.** Sub-status `0xC0000072` is rare and specific, unlike raw failure
+  counts, which hid it on the VM.
 - **Alert on collector failures the same day.** A missed run should notify someone immediately, not just turn a KRI
   amber.
 - **Size the Security log for the collection interval**, and alert in real time on overwrite gaps and log clears.
-- **Alert on each privileged group change.** A 7-day count missed both of `helpdesk_tom`'s changes in the sample.
-  Each change should be matched to a ticket when it happens.
 - **Separate lockout causes.** Use failure speed and source to tell spraying or brute force (many accounts, one
   source, fast) apart from stale saved passwords (one account, steady).
 - **Track detection quality over time.** Re-run the precision/recall evaluation whenever indicators or thresholds
@@ -484,11 +445,13 @@ against the VM results.
 
 ## Limitations
 
-- The local half runs on a single standalone VM. There is no Active Directory, so there are no domain events.
+- The local half runs on a single standalone VM with mostly staged activity. There is no Active Directory, so there
+  are no domain events.
+- The lab VM scenario ran over 8 days, with two steps late and two days without staged activity. A new VM can't
+  produce an old password or a local orphaned SID, so those KRIs are only exercised by the sample.
 - The LANL evaluation covers one baseline day and one detection day. Results may differ on other days.
 - LANL red-team labels are incomplete, so precision is a lower bound.
 - The sample database is synthetic and built to be detectable. It validates the code, not the detection performance.
-- Lab VM results are pending.
 
 ## Repository layout
 
@@ -498,7 +461,7 @@ lanl/        LANL streaming importer and dataset notes
 sql/         Schema, local views, LANL indicator views, KRI summary
 tests/       Pester tests and fixtures
 sample/      Synthetic database and the script that builds it
-powerbi/     Dashboard build notes
+powerbi/     Dashboard notes and screenshots
 report/      Findings report
 data/        Git-ignored: VM database, LANL slice, staged-activity log, audit evidence
 ```
@@ -508,8 +471,8 @@ such as the tables above, are published.
 
 | Document | Covers |
 |---|---|
-| [ENGINEERING.md](ENGINEERING.md) | Architecture, installation, configuration, schema, testing, troubleshooting |
-| [VM_SETUP.md](VM_SETUP.md) | Building the Hyper-V lab VM |
+| [ENGINEERING.md](ENGINEERING.md) | Architecture, installation, configuration, schema, data details, testing, troubleshooting |
+| [VM_SETUP.md](VM_SETUP.md) | Building the Hyper-V lab VM and running the staged scenario |
 | [lanl/README.md](lanl/README.md) | LANL download, terms, slice selection, filtering |
 | [powerbi/README.md](powerbi/README.md) | ODBC connection, imported tables, dashboard pages |
 | [report/findings.md](report/findings.md) | Findings, evidence and recommendations |
